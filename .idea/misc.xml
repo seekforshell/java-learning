@@ -8,8 +8,12 @@
       <list>
         <option value="$PROJECT_DIR$/design/example/pom.xml" />
         <option value="$PROJECT_DIR$/jdk/threadpoolexecutor/threadpool/pom.xml" />
+        <option value="$PROJECT_DIR$/jdk/lock/lock/pom.xml" />
+        <option value="$PROJECT_DIR$/jdk/security/pom.xml" />
+        <option value="$PROJECT_DIR$/jdk/pom.xml" />
+        <option value="$PROJECT_DIR$/jdk/tools/pom.xml" />
       </list>
     </option>
   </component>
-  <component name="ProjectRootManager" version="2" languageLevel="JDK_13" default="false" project-jdk-name="1.8" project-jdk-type="JavaSDK" />
+  <component name="ProjectRootManager" version="2" languageLevel="JDK_12" default="false" project-jdk-name="1.8" project-jdk-type="JavaSDK" />
 </project>

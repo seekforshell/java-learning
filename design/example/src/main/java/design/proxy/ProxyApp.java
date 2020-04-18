@@ -24,6 +24,6 @@ public class ProxyApp {
         ConsumterInterface proxyConsumer = (ConsumterInterface) Proxy.newProxyInstance(consumer.getClass().getClassLoader(),
                 consumer.getClass().getInterfaces(), handler);
 
-        proxyConsumer.purchase(null);
+        proxyConsumer.purchase();
     }
 }
