@@ -7,10 +7,11 @@
         <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
         <outputRelativeToContentRoot value="true" />
         <module name="jwt" />
-        <module name="lock" />
+        <module name="jol" />
         <module name="design" />
-        <module name="jol-lab" />
         <module name="threadpool" />
+        <module name="lock" />
+        <module name="jol-lab" />
       </profile>
     </annotationProcessing>
     <bytecodeTargetLevel>
