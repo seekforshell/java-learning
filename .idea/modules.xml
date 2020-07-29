@@ -4,9 +4,13 @@
     <modules>
       <module fileurl="file://$PROJECT_DIR$/design/example/design.iml" filepath="$PROJECT_DIR$/design/example/design.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/javalearning.iml" filepath="$PROJECT_DIR$/.idea/javalearning.iml" />
+      <module fileurl="file://$PROJECT_DIR$/jdk/tools/jol.iml" filepath="$PROJECT_DIR$/jdk/tools/jol.iml" />
       <module fileurl="file://$PROJECT_DIR$/jol-lab/jol-lab.iml" filepath="$PROJECT_DIR$/jol-lab/jol-lab.iml" />
+      <module fileurl="file://$PROJECT_DIR$/jdk/jvm/jvm.iml" filepath="$PROJECT_DIR$/jdk/jvm/jvm.iml" />
+      <module fileurl="file://$PROJECT_DIR$/jdk/jvmLab/jvmLab.iml" filepath="$PROJECT_DIR$/jdk/jvmLab/jvmLab.iml" />
       <module fileurl="file://$PROJECT_DIR$/jdk/security/jwt.iml" filepath="$PROJECT_DIR$/jdk/security/jwt.iml" />
       <module fileurl="file://$PROJECT_DIR$/jdk/lock/lock/lock.iml" filepath="$PROJECT_DIR$/jdk/lock/lock/lock.iml" />
+      <module fileurl="file://$PROJECT_DIR$/system/redis/redis.iml" filepath="$PROJECT_DIR$/system/redis/redis.iml" />
       <module fileurl="file://$PROJECT_DIR$/jdk/threadpoolexecutor/threadpool/threadpool.iml" filepath="$PROJECT_DIR$/jdk/threadpoolexecutor/threadpool/threadpool.iml" />
     </modules>
   </component>
