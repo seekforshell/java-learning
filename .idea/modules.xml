@@ -3,7 +3,11 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/design/example/design.iml" filepath="$PROJECT_DIR$/design/example/design.iml" />
+<<<<<<< HEAD
       <module fileurl="file://$PROJECT_DIR$/.idea/javalearning.iml" filepath="$PROJECT_DIR$/.idea/javalearning.iml" />
+=======
+      <module fileurl="file://$PROJECT_DIR$/.idea/java-learning.iml" filepath="$PROJECT_DIR$/.idea/java-learning.iml" />
+>>>>>>> 217445f2b867bc38e73d30fab5f8d3035f4b8e38
       <module fileurl="file://$PROJECT_DIR$/jdk/tools/jol.iml" filepath="$PROJECT_DIR$/jdk/tools/jol.iml" />
       <module fileurl="file://$PROJECT_DIR$/jol-lab/jol-lab.iml" filepath="$PROJECT_DIR$/jol-lab/jol-lab.iml" />
       <module fileurl="file://$PROJECT_DIR$/jdk/jvm/jvm.iml" filepath="$PROJECT_DIR$/jdk/jvm/jvm.iml" />

@@ -6,14 +6,7 @@
   <component name="MavenProjectsManager">
     <option name="originalFiles">
       <list>
-        <option value="$PROJECT_DIR$/design/example/pom.xml" />
-        <option value="$PROJECT_DIR$/jdk/threadpoolexecutor/threadpool/pom.xml" />
-        <option value="$PROJECT_DIR$/jdk/lock/lock/pom.xml" />
-        <option value="$PROJECT_DIR$/jdk/security/pom.xml" />
         <option value="$PROJECT_DIR$/jdk/pom.xml" />
-        <option value="$PROJECT_DIR$/jdk/tools/pom.xml" />
-        <option value="$PROJECT_DIR$/jdk/jvmLab/pom.xml" />
-        <option value="$PROJECT_DIR$/system/redis/pom.xml" />
       </list>
     </option>
   </component>

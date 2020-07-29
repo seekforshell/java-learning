@@ -8,10 +8,15 @@
         <outputRelativeToContentRoot value="true" />
         <module name="jwt" />
         <module name="jol" />
+<<<<<<< HEAD
         <module name="redis" />
         <module name="design" />
         <module name="threadpool" />
         <module name="jvmLab" />
+=======
+        <module name="design" />
+        <module name="threadpool" />
+>>>>>>> 217445f2b867bc38e73d30fab5f8d3035f4b8e38
         <module name="lock" />
         <module name="jol-lab" />
       </profile>
