@@ -2,13 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/design/example/design.iml" filepath="$PROJECT_DIR$/design/example/design.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/java-learning.iml" filepath="$PROJECT_DIR$/.idea/java-learning.iml" />
-      <module fileurl="file://$PROJECT_DIR$/jdk/tools/jol.iml" filepath="$PROJECT_DIR$/jdk/tools/jol.iml" />
-      <module fileurl="file://$PROJECT_DIR$/jol-lab/jol-lab.iml" filepath="$PROJECT_DIR$/jol-lab/jol-lab.iml" />
-      <module fileurl="file://$PROJECT_DIR$/jdk/security/jwt.iml" filepath="$PROJECT_DIR$/jdk/security/jwt.iml" />
-      <module fileurl="file://$PROJECT_DIR$/jdk/lock/lock/lock.iml" filepath="$PROJECT_DIR$/jdk/lock/lock/lock.iml" />
-      <module fileurl="file://$PROJECT_DIR$/jdk/threadpoolexecutor/threadpool/threadpool.iml" filepath="$PROJECT_DIR$/jdk/threadpoolexecutor/threadpool/threadpool.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/javalearning.iml" filepath="$PROJECT_DIR$/.idea/javalearning.iml" />
     </modules>
   </component>
 </project>
