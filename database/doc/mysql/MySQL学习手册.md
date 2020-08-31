@@ -1,6 +1,36 @@
-# MySQL命令集合
+# MySQL修炼手册
 
 ## 数据库命令
+
+## 函数
+
+### 窗口函数
+
+
+
+| Name                                                         | Description                                                  |
+| ------------------------------------------------------------ | ------------------------------------------------------------ |
+| [`CUME_DIST()`](https://dev.mysql.com/doc/refman/8.0/en/window-function-descriptions.html#function_cume-dist) | Cumulative distribution value                                |
+| [`DENSE_RANK()`](https://dev.mysql.com/doc/refman/8.0/en/window-function-descriptions.html#function_dense-rank) | Rank of current row within its partition, without gaps       |
+| [`FIRST_VALUE()`](https://dev.mysql.com/doc/refman/8.0/en/window-function-descriptions.html#function_first-value) | Value of argument from first row of window frame             |
+| [`LAG()`](https://dev.mysql.com/doc/refman/8.0/en/window-function-descriptions.html#function_lag) | Value of argument from row lagging current row within partition |
+| [`LAST_VALUE()`](https://dev.mysql.com/doc/refman/8.0/en/window-function-descriptions.html#function_last-value) | Value of argument from last row of window frame              |
+| [`LEAD()`](https://dev.mysql.com/doc/refman/8.0/en/window-function-descriptions.html#function_lead) | Value of argument from row leading current row within partition |
+| [`NTH_VALUE()`](https://dev.mysql.com/doc/refman/8.0/en/window-function-descriptions.html#function_nth-value) | Value of argument from N-th row of window frame              |
+| [`NTILE()`](https://dev.mysql.com/doc/refman/8.0/en/window-function-descriptions.html#function_ntile) | Bucket number of current row within its partition.           |
+| [`PERCENT_RANK()`](https://dev.mysql.com/doc/refman/8.0/en/window-function-descriptions.html#function_percent-rank) | Percentage rank value                                        |
+| [`RANK()`](https://dev.mysql.com/doc/refman/8.0/en/window-function-descriptions.html#function_rank) | Rank of current row within its partition, with gaps          |
+| [`ROW_NUMBER()`](https://dev.mysql.com/doc/refman/8.0/en/window-function-descriptions.html#function_row-number) | Number of current row within its partition                   |
+
+
+
+参考手册：
+
+https://www.jianshu.com/p/aabd8bf6b51c
+
+### 聚合函数
+
+
 
 ## mysqldump
 
@@ -23,10 +53,10 @@
 ​    
 ​       Override the --databases or -B option.  mysqldump regards all name arguments following the option as table names.
 ​    
-    When you selectively enable or disable the effect of a group option, order is important because options are processed first to last. For
-    example, --disable-keys --lock-tables --skip-opt would not have the intended effect; it is the same as --skip-opt by itself.
-    Examples.PP To make a backup of an entire database:
-    
+​    When you selectively enable or disable the effect of a group option, order is important because options are processed first to last. For
+​    example, --disable-keys --lock-tables --skip-opt would not have the intended effect; it is the same as --skip-opt by itself.
+​    Examples.PP To make a backup of an entire database:
+​    
        shell> mysqldump db_name > backup-file.sql
     
     To load the dump file back into the server:
@@ -131,6 +161,12 @@ ADD CONSTRAINT `order_good`
 
 
 ###  插入-insert
+
+#### 如果不存在则插入
+
+```sql
+INSERT INTO goods (gname,price,descr) select 'aa',10,'desc' from dual where not exists (select * from goods where gname = 'aa')
+```
 
 注意 insert 多个值得时候后面是以括号分隔的。
 
