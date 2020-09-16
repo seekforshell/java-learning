@@ -1,5 +1,7 @@
 
 
+[toc]
+
 # Redis修炼手册
 
 ## 集群部署
@@ -306,7 +308,11 @@ https://www.jianshu.com/p/be14306f5fd8
 
 ## 使用场景
 
+ 
 
+## 参考资料
+
+ <https://www.scienjus.com/redis-use-case/> 
 
 ## Redis集群原理
 
@@ -581,3 +587,59 @@ typedef struct {
 
 
 ## 常用数据结构
+
+
+
+
+
+## 源码剖析
+
+
+
+### 架构
+
+
+
+![arch](M:\github\java-learning\system\redis\images\redis-arch.png)
+
+### 客户端请求流程
+
+说明如下：
+
+客户端与服务端建立连接之后，定时调度程序poll得到ready事件和socket,调用readQueryFromClient函数，
+
+这个函数会读取客户端写入的buff并将其转换为相应的命令行，通过启动redis时注册的api模块表查找相应的命令行执行命令并返回给客户端。每次执行完命令后会去阻塞server上的readykeys，为什么这个节点去（大概是因为当前命令行可能会有写操作导致必须阻塞，待命令行执行完毕后便可unblock，后续需确认），
+
+如果是集群模式，那么存在命令行执行前后的数据差异变化还需要调用相应的代理函数（replicationFeedSlavesFromMasteStream），讲这些增量数据同步到所有的slave节点。
+
+![image-20200916231027615](images\redis-client)
+
+
+
+### 集群同步
+
+注意：这里的nodes.conf是保存的集群节点信息，这里集群最复杂的地方就是分区的数据备份同步机制，后面分析：
+
+注意这里的数据仓库和缓存是集群关注的重点后续需重点研究，数据仓库的同步
+
+分布式数据存储的考虑哪些规则？
+
+1.数据可用性
+
+2.节点的异常、恢复和添加的机制
+
+![cluster](images\cluster-sync.png)
+
+### 字典表
+
+ 
+
+上图表达了一次字典表,resize的过程。
+
+1.首先分配一个拓容的内存端
+
+2.然后遍历原来的hash表进行逐一复制，也包括链表指针的赋值
+
+3.进行原来内存的释放
+
+![dict](images\redis-dict.jpg)
