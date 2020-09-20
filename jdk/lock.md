@@ -346,6 +346,7 @@ private void doAcquireShared(int arg) {
                 // 读写锁返回1表示需要广播
                 int r = tryAcquireShared(arg);
                 if (r >= 0) {
+                  	// 注意这里也会通知互斥节点，但是互斥节点拿不到锁会继续加入队列
                     setHeadAndPropagate(node, r);
                     p.next = null; // help GC
                     if (interrupted)
@@ -401,6 +402,40 @@ private static boolean shouldParkAfterFailedAcquire(Node pred, Node node) {
     return false;
 }
 ```
+
+setHeadAndPropagate
+
+```java
+private void setHeadAndPropagate(Node node, int propagate) {
+    Node h = head; // Record old head for check below
+    setHead(node);
+    /*
+     * Try to signal next queued node if:
+     *   Propagation was indicated by caller,
+     *     or was recorded (as h.waitStatus either before
+     *     or after setHead) by a previous operation
+     *     (note: this uses sign-check of waitStatus because
+     *      PROPAGATE status may transition to SIGNAL.)
+     * and
+     *   The next node is waiting in shared mode,
+     *     or we don't know, because it appears null
+     *
+     * The conservatism in both of these checks may cause
+     * unnecessary wake-ups, but only when there are multiple
+     * racing acquires/releases, so most need signals now or soon
+     * anyway.
+     */
+    if (propagate > 0 || h == null || h.waitStatus < 0 ||
+        (h = head) == null || h.waitStatus < 0) {
+        Node s = node.next;
+        // 这里判断s是否是共享的node节点，区分互斥节点
+        if (s == null || s.isShared())
+            doReleaseShared();
+    }
+}
+```
+
+
 
 ### 互质机制
 
