@@ -1,3 +1,303 @@
+[toc]
+
+
+
+# Java数据结构
+
+
+
+### HashMap结构，什么对象能做key?
+
+hashmap是数组+单链表/红黑树的形式，key可以为空
+
+具体实现原理参考数据结构章节
+
+
+
+
+
+### Unsafe用途？
+
+
+
+![img](images/unsafe.png)
+
+参考文档：
+
+https://www.jianshu.com/p/db8dce09232d
+
+
+
+# 数据结构
+
+### HashMap
+
+hashmap是数组+单链表/红黑树的形式
+
+map节点数据结构：
+
+```java
+static class Node<K,V> implements Map.Entry<K,V> {
+    final int hash;
+    final K key;
+    V value;
+    Node<K,V> next;
+  Node(int hash, K key, V value, Node<K,V> next) {
+    this.hash = hash;
+    this.key = key;
+    this.value = value;
+    this.next = next;
+  }
+  ...
+}  
+  
+```
+
+红黑树节点数据结构
+
+```java
+static final class TreeNode<K,V> extends LinkedHashMap.Entry<K,V> {
+    TreeNode<K,V> parent;  // red-black tree links
+    TreeNode<K,V> left;
+    TreeNode<K,V> right;
+    TreeNode<K,V> prev;    // needed to unlink next upon deletion
+    boolean red;
+    TreeNode(int hash, K key, V val, Node<K,V> next) {
+        super(hash, key, val, next);
+    }
+  ...
+}    
+```
+
+#### put/putVal
+
+```java
+public V put(K key, V value) {
+  
+	return putVal(hash(key), key, value, false, true);
+}
+
+final V putVal(int hash, K key, V value, boolean onlyIfAbsent,
+               boolean evict) {
+    Node<K,V>[] tab;  // 当前map数组
+  	Node<K,V> p; 			// 当前key所在的槽位
+  	int n, i;
+  	// map为空进行第一次拓容
+    if ((tab = table) == null || (n = tab.length) == 0)
+        n = (tab = resize()).length;
+  	// 取模后如果为空则生成一个新的节点
+    if ((p = tab[i = (n - 1) & hash]) == null)
+        tab[i] = newNode(hash, key, value, null);
+    else {
+        Node<K,V> e; K k;
+      	// 如果hash并且key相同则覆盖
+        if (p.hash == hash &&
+            ((k = p.key) == key || (key != null && key.equals(k))))
+            e = p;
+      	// 如果是红黑树则往树中插入子节点
+        else if (p instanceof TreeNode)
+            e = ((TreeNode<K,V>)p).putTreeVal(this, tab, hash, key, value);
+        else {
+          	// 当前hash槽小于7时进行链表操作，大于等于7时进行红黑树化
+            for (int binCount = 0; ; ++binCount) {
+                if ((e = p.next) == null) {
+                    p.next = newNode(hash, key, value, null);
+                  	// 槽位节点数大于等于7时进行红黑树化
+                    if (binCount >= TREEIFY_THRESHOLD - 1) // -1 for 1st
+                        treeifyBin(tab, hash);
+                    break;
+                }
+                if (e.hash == hash &&
+                    ((k = e.key) == key || (key != null && key.equals(k))))
+                    break;
+                p = e;
+            }
+        }
+        if (e != null) { // existing mapping for key
+            V oldValue = e.value;
+            if (!onlyIfAbsent || oldValue == null)
+                e.value = value;
+            afterNodeAccess(e);
+            return oldValue;
+        }
+    }
+  	// 修改次数
+    ++modCount;
+    // 当map的大小大于指定阈值则进行拓容；map拓容以指数的形式拓展
+    if (++size > threshold)
+        resize();
+    afterNodeInsertion(evict);
+    return null;
+}
+```
+
+
+
+#### resize
+
+拓容分以下几种情况：
+
+1.初始化拓容
+
+2.node容量达到阈值需要拓容
+
+```java
+final Node<K,V>[] resize() {
+    Node<K,V>[] oldTab = table;
+    int oldCap = (oldTab == null) ? 0 : oldTab.length;
+    int oldThr = threshold;
+    int newCap, newThr = 0;
+  	/*
+  	 * a.如果老的数组大小大于0则进行2*oldCap指数拓容
+  	 * b.否则存在oldThr大于0则新的数据大小设为oldThr
+  	 * c.最后取初始化大小16，阈值为16*0.75
+  	 *
+  	**/
+    if (oldCap > 0) {
+        if (oldCap >= MAXIMUM_CAPACITY) {
+            threshold = Integer.MAX_VALUE;
+            return oldTab;
+        }
+        else if ((newCap = oldCap << 1) < MAXIMUM_CAPACITY &&
+                 oldCap >= DEFAULT_INITIAL_CAPACITY)
+            newThr = oldThr << 1; // double threshold
+    }
+    else if (oldThr > 0) // initial capacity was placed in threshold
+        newCap = oldThr;
+    else {               // zero initial threshold signifies using defaults
+        newCap = DEFAULT_INITIAL_CAPACITY;
+        newThr = (int)(DEFAULT_LOAD_FACTOR * DEFAULT_INITIAL_CAPACITY);
+    }
+  
+    if (newThr == 0) {
+        float ft = (float)newCap * loadFactor;
+        newThr = (newCap < MAXIMUM_CAPACITY && ft < (float)MAXIMUM_CAPACITY ?
+                  (int)ft : Integer.MAX_VALUE);
+    }
+    threshold = newThr;
+    @SuppressWarnings({"rawtypes","unchecked"})
+  	// 生成新的数组
+    Node<K,V>[] newTab = (Node<K,V>[])new Node[newCap];
+    table = newTab;
+    if (oldTab != null) {
+      	// 遍历老数组进行取新的数组大小进行重hash
+        for (int j = 0; j < oldCap; ++j) {
+            Node<K,V> e;
+            if ((e = oldTab[j]) != null) {
+                oldTab[j] = null;
+                if (e.next == null)
+                    newTab[e.hash & (newCap - 1)] = e;
+                else if (e instanceof TreeNode)
+                    ((TreeNode<K,V>)e).split(this, newTab, j, oldCap);
+                else { // preserve order
+                    Node<K,V> loHead = null, loTail = null;
+                    Node<K,V> hiHead = null, hiTail = null;
+                    Node<K,V> next;
+                    do {
+                        next = e.next;
+                        if ((e.hash & oldCap) == 0) {
+                            if (loTail == null)
+                                loHead = e;
+                            else
+                                loTail.next = e;
+                            loTail = e;
+                        }
+                        else {
+                            if (hiTail == null)
+                                hiHead = e;
+                            else
+                                hiTail.next = e;
+                            hiTail = e;
+                        }
+                    } while ((e = next) != null);
+                    if (loTail != null) {
+                        loTail.next = null;
+                        newTab[j] = loHead;
+                    }
+                    if (hiTail != null) {
+                        hiTail.next = null;
+                        newTab[j + oldCap] = hiHead;
+                    }
+                }
+            }
+        }
+    }
+    return newTab;
+}
+```
+
+### ConcurrentHashMap
+
+
+
+
+
+```java
+final V putVal(K key, V value, boolean onlyIfAbsent) {
+    if (key == null || value == null) throw new NullPointerException();
+    int hash = spread(key.hashCode());
+    int binCount = 0;
+    for (Node<K,V>[] tab = table;;) {
+        Node<K,V> f; int n, i, fh;
+        if (tab == null || (n = tab.length) == 0)
+            tab = initTable();
+        else if ((f = tabAt(tab, i = (n - 1) & hash)) == null) {
+            if (casTabAt(tab, i, null,
+                         new Node<K,V>(hash, key, value, null)))
+                break;                   // no lock when adding to empty bin
+        }
+        else if ((fh = f.hash) == MOVED)
+            tab = helpTransfer(tab, f);
+        else {
+            V oldVal = null;
+            synchronized (f) {
+                if (tabAt(tab, i) == f) {
+                    if (fh >= 0) {
+                        binCount = 1;
+                        for (Node<K,V> e = f;; ++binCount) {
+                            K ek;
+                            if (e.hash == hash &&
+                                ((ek = e.key) == key ||
+                                 (ek != null && key.equals(ek)))) {
+                                oldVal = e.val;
+                                if (!onlyIfAbsent)
+                                    e.val = value;
+                                break;
+                            }
+                            Node<K,V> pred = e;
+                            if ((e = e.next) == null) {
+                                pred.next = new Node<K,V>(hash, key,
+                                                          value, null);
+                                break;
+                            }
+                        }
+                    }
+                    else if (f instanceof TreeBin) {
+                        Node<K,V> p;
+                        binCount = 2;
+                        if ((p = ((TreeBin<K,V>)f).putTreeVal(hash, key,
+                                                       value)) != null) {
+                            oldVal = p.val;
+                            if (!onlyIfAbsent)
+                                p.val = value;
+                        }
+                    }
+                }
+            }
+            if (binCount != 0) {
+                if (binCount >= TREEIFY_THRESHOLD)
+                    treeifyBin(tab, i);
+                if (oldVal != null)
+                    return oldVal;
+                break;
+            }
+        }
+    }
+    addCount(1L, binCount);
+    return null;
+}
+```
+
 # Java同步机制
 
 ## 概述
