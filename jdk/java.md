@@ -647,17 +647,25 @@ accquire和release是实现互斥机制的主体逻辑，下面将逐个分析�
 
 ```java
 public final void acquire(int arg) {
-  	// 获取state资源，
+  	/* 获取state资源，如果没有获取成功则以互斥的方式加入等待队列
+  	 */
     if (!tryAcquire(arg) &&
         acquireQueued(addWaiter(Node.EXCLUSIVE), arg))
         selfInterrupt();
 }
 ```
+
 ##### tryAcquire
+
+以具体实现类为准，这里以ReentrantLock为例
 
 ```java
 protected final boolean tryAcquire(int acquires) {
     final Thread current = Thread.currentThread();
+    /* 获取当前state
+     * a.如果为0表示没有线程占有锁进行获取锁的操作：如果CLH队列中没有前驱节点则进行CAS操作将state置为1
+     * b.如果不为0但是持有锁的线程是当前线程，则对state进行+1操作，此步骤是为了这次可重入
+     */
     int c = getState();
     if (c == 0) {
         if (!hasQueuedPredecessors() &&
@@ -683,7 +691,7 @@ protected final boolean tryAcquire(int acquires) {
 
 
 
-<img src="images/AQS.png" alt="AQS" style="zoom:67%;" />
+<img src="C:/Users/ykongfu/Desktop/images/AQS.png" alt="AQS" style="zoom:67%;" />
 
 
 
@@ -728,7 +736,35 @@ private Node enq(final Node node) {
 }
 ```
 
+##### acquireQueued
 
+
+
+```java
+final boolean acquireQueued(final Node node, int arg) {
+    boolean failed = true;
+    try {
+        boolean interrupted = false;
+        for (;;) {
+            final Node p = node.predecessor();
+            // 当头节点是head时
+            if (p == head && tryAcquire(arg)) {
+                // CLH是通过设置head出队，也就是FIFO的方式
+                setHead(node);
+                p.next = null; // help GC
+                failed = false;
+                return interrupted;
+            }
+            if (shouldParkAfterFailedAcquire(p, node) &&
+                parkAndCheckInterrupt())
+                interrupted = true;
+        }
+    } finally {
+        if (failed)
+            cancelAcquire(node);
+    }
+}
+```
 
 #### release
 
@@ -889,7 +925,7 @@ protected final int tryAcquireShared(int unused) {
 
 ##### doAcquireShared
 
-这里是获取不到锁，进行入队的流程。
+这里是获取不到锁，进行入队的流程。和互斥模式的acquireQueued一样都有一个自旋的操作，获取不到锁就设置前驱节点状态然后park；不同的地方在于共享模式下会进行广播操作，通知CLH队列中的等待者。
 
 ```java
 private void doAcquireShared(int arg) {
@@ -906,7 +942,7 @@ private void doAcquireShared(int arg) {
                 // 读写锁返回1表示需要广播
                 int r = tryAcquireShared(arg);
                 if (r >= 0) {
-                  	// 注意这里也会通知互斥节点，但是互斥节点拿不到锁会继续加入队列
+                  	// 通知共享节点
                     setHeadAndPropagate(node, r);
                     p.next = null; // help GC
                     if (interrupted)
@@ -963,11 +999,12 @@ private static boolean shouldParkAfterFailedAcquire(Node pred, Node node) {
 }
 ```
 
-setHeadAndPropagate
+###### setHeadAndPropagate
 
 ```java
 private void setHeadAndPropagate(Node node, int propagate) {
     Node h = head; // Record old head for check below
+    // 出队列
     setHead(node);
     /*
      * Try to signal next queued node if:
@@ -997,7 +1034,194 @@ private void setHeadAndPropagate(Node node, int propagate) {
 
 
 
-### 互质机制
+##### releaseShared
+
+```
+public final boolean releaseShared(int arg) {
+	// 设置state成功后
+    if (tryReleaseShared(arg)) {
+        doReleaseShared();
+        return true;
+    }
+    return false;
+}
+```
+
+
+
+###### tryReleaseShared
+
+```java
+protected final boolean tryReleaseShared(int unused) {
+    Thread current = Thread.currentThread();
+    if (firstReader == current) {
+        // assert firstReaderHoldCount > 0;
+        if (firstReaderHoldCount == 1)
+            firstReader = null;
+        else
+            firstReaderHoldCount--;
+    } else {
+        HoldCounter rh = cachedHoldCounter;
+        if (rh == null || rh.tid != getThreadId(current))
+            rh = readHolds.get();
+        int count = rh.count;
+        if (count <= 1) {
+            readHolds.remove();
+            if (count <= 0)
+                throw unmatchedUnlockException();
+        }
+        --rh.count;
+    }
+    for (;;) {
+        int c = getState();
+        int nextc = c - SHARED_UNIT;
+        if (compareAndSetState(c, nextc))
+            // Releasing the read lock has no effect on readers,
+            // but it may allow waiting writers to proceed if
+            // both read and write locks are now free.
+            return nextc == 0;
+    }
+}
+```
+
+doReleaseShared
+
+```java
+private void doReleaseShared() {
+    /*
+     * Ensure that a release propagates, even if there are other
+     * in-progress acquires/releases.  This proceeds in the usual
+     * way of trying to unparkSuccessor of head if it needs
+     * signal. But if it does not, status is set to PROPAGATE to
+     * ensure that upon release, propagation continues.
+     * Additionally, we must loop in case a new node is added
+     * while we are doing this. Also, unlike other uses of
+     * unparkSuccessor, we need to know if CAS to reset status
+     * fails, if so rechecking.
+     */
+    for (;;) {
+        Node h = head;
+        if (h != null && h != tail) {
+            int ws = h.waitStatus;
+            if (ws == Node.SIGNAL) {
+                if (!compareAndSetWaitStatus(h, Node.SIGNAL, 0))
+                    continue;            // loop to recheck cases
+                unparkSuccessor(h);
+            }
+            // 如果ws为0则设为广播状态，方便setHeadAndPropagate可以广播
+            // 有可能该节点是最后一个节点，没有后继节点，这样它的状态初始化为0，但是它也需要在广播中被通知到
+            else if (ws == 0 &&
+                     !compareAndSetWaitStatus(h, 0, Node.PROPAGATE))
+                continue;                // loop on failed CAS
+        }
+        if (h == head)                   // loop if head changed
+            break;
+    }
+}
+```
+
+### 条件锁
+
+条件锁的实现主要是AQS当中的内部类ConditionObject实现，其实现接口Condition
+
+```java
+public interface Condition {
+
+    void await() throws InterruptedException;
+
+    void awaitUninterruptibly();
+
+    boolean await(long time, TimeUnit unit) throws InterruptedException;
+
+    boolean awaitUntil(Date deadline) throws InterruptedException;
+
+    void signal();
+
+    void signalAll();
+}
+
+```
+
+
+
+这里我们可以看到有两种基本操作await和signal。
+
+
+
+需要说明的是ConditionObject维护着一张单链表，链表头是firstWaiter，然后通过Node中的nextWaiter字段实现链表关系维护；
+
+await就是往该单链表中加节点，signal就是讲该节点加入到CLH的同步队列中去。
+
+```
+private transient Node firstWaiter;
+```
+
+#### await
+
+
+
+```java
+public final void await() throws InterruptedException {
+    if (Thread.interrupted())
+        throw new InterruptedException();
+    // 生成一个node，添加到单链表
+    Node node = addConditionWaiter();
+    int savedState = fullyRelease(node);
+    int interruptMode = 0;
+    // 如果该节点不在CLH同步队列中则park
+    while (!isOnSyncQueue(node)) {
+        LockSupport.park(this);
+        if ((interruptMode = checkInterruptWhileWaiting(node)) != 0)
+            break;
+    }
+    // 下面的流程是signal流程unlock之后才会走到这里来
+    // accquireQueue是互斥锁的流程：不断自旋获取到锁就出队，获取不到就park等待再次唤醒
+    if (acquireQueued(node, savedState) && interruptMode != THROW_IE)
+        interruptMode = REINTERRUPT;
+    if (node.nextWaiter != null) // clean up if cancelled
+        unlinkCancelledWaiters();
+    if (interruptMode != 0)
+        reportInterruptAfterWait(interruptMode);
+}
+```
+
+
+
+#### addConditionWaiter
+
+```java
+private Node addConditionWaiter() {
+    Node t = lastWaiter;
+    // If lastWaiter is cancelled, clean out.
+    if (t != null && t.waitStatus != Node.CONDITION) {
+        unlinkCancelledWaiters();
+        t = lastWaiter;
+    }
+    Node node = new Node(Thread.currentThread(), Node.CONDITION);
+    if (t == null)
+        firstWaiter = node;
+    else
+        t.nextWaiter = node;
+    lastWaiter = node;
+    return node;
+}
+```
+
+#### signal
+
+```java
+public final void signal() {
+    // 首先判断是否获取到锁，比如可重入锁的lock有没有成功
+    if (!isHeldExclusively())
+        throw new IllegalMonitorStateException();
+    Node first = firstWaiter;
+    if (first != null)
+        // doSignal的操作是将节点加入到同步队列中
+        doSignal(first);
+}
+```
+
+
 
 
 
