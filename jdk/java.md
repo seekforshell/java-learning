@@ -2,11 +2,9 @@
 
 
 
-# Java数据结构
+# Java FAQ
 
-
-
-### HashMap结构，什么对象能做key?
+- HashMap结构，什么对象能做key?
 
 hashmap是数组+单链表/红黑树的形式，key可以为空
 
@@ -14,9 +12,51 @@ hashmap是数组+单链表/红黑树的形式，key可以为空
 
 
 
+- StringBuilder和StringBuffer?
+
+StringBuffer是线程安全的，因为其方法添加了synchronized类。
+
+```java
+@Override
+public synchronized StringBuffer append(String str) {
+    toStringCache = null;
+    super.append(str);
+    return this;
+}
+```
+
+- synchronized实现原理
+
+偏向锁、轻量级锁、重量级锁是如何过渡的？
+
+监视器是什么？监视器和对象头的关系？监视器实现原理是什么？
 
 
-### Unsafe用途？
+
+- 对象的深拷贝与浅拷贝？
+
+**浅拷贝**：创建一个新对象，然后将当前对象的非静态字段复制到该对象，如果字段类型是值类型（基本类型）的，那么对该字段进行复制；如果字段是引用类型的，则只复制该字段的引用而不复制引用指向的对象。此时新对象里面的引用类型字段相当于是原始对象里面引用类型字段的一个副本，原始对象与新对象里面的引用字段指向的是同一个对象。
+
+**深拷贝**
+了解了浅拷贝，那么深拷贝是什么也就很清楚了。即将引用类型的属性内容也拷贝一份新的。
+
+那么，**实现深拷贝我这里收集到两种方式：**
+
+第一种是给需要拷贝的引用类型也实现Cloneable接口并覆写clone方法；
+
+第二种则是利用序列化。
+
+- countdownlatch await方法是线程安全的吗？
+
+是。内部使用了volatile和cas机制保证了原子性和可见性。但是可能会出现其他线程没有countdown导致线程
+
+一直等待的情形，所以最好调用带超时时间的接口
+
+```java
+public boolean await(long timeout, TimeUnit unit)	throws InterruptedException
+```
+
+- Unsafe用途？
 
 
 
@@ -29,6 +69,14 @@ https://www.jianshu.com/p/db8dce09232d
 
 
 # 数据结构
+
+## 队列
+
+
+
+## Map
+
+
 
 ### HashMap
 
@@ -298,12 +346,224 @@ final V putVal(K key, V value, boolean onlyIfAbsent) {
 }
 ```
 
+# 多线程
+
+
+
+## ThreadPoolExecutor
+
+
+
+### 初始化
+
+
+
+```java
+protected ThreadPoolExecutor createExecutor(
+      int corePoolSize, int maxPoolSize, int keepAliveSeconds, BlockingQueue<Runnable> queue,
+      ThreadFactory threadFactory, RejectedExecutionHandler rejectedExecutionHandler) {
+
+   return new ThreadPoolExecutor(corePoolSize, maxPoolSize,
+         keepAliveSeconds, TimeUnit.SECONDS, queue, threadFactory, rejectedExecutionHandler);
+}
+```
+
+
+
+接口线程工厂：可以自定义线程创建过程，比如设置线程优先级、线程组、是否守护线程等属性
+
+```java
+public interface ThreadFactory {
+
+    /**
+     * Constructs a new {@code Thread}.  Implementations may also initialize
+     * priority, name, daemon status, {@code ThreadGroup}, etc.
+     *
+     * @param r a runnable to be executed by new thread instance
+     * @return constructed thread, or {@code null} if the request to
+     *         create a thread is rejected
+     */
+    Thread newThread(Runnable r);
+}
+```
+
+
+
+自定义拒接信息收集：比如抛出一个特定异常和相关信息
+
+```java
+public interface RejectedExecutionHandler {
+
+    /**
+     * Method that may be invoked by a {@link ThreadPoolExecutor} when
+     * {@link ThreadPoolExecutor#execute execute} cannot accept a
+     * task.  This may occur when no more threads or queue slots are
+     * available because their bounds would be exceeded, or upon
+     * shutdown of the Executor.
+     *
+     * <p>In the absence of other alternatives, the method may throw
+     * an unchecked {@link RejectedExecutionException}, which will be
+     * propagated to the caller of {@code execute}.
+     *
+     * @param r the runnable task requested to be executed
+     * @param executor the executor attempting to execute this task
+     * @throws RejectedExecutionException if there is no remedy
+     */
+    void rejectedExecution(Runnable r, ThreadPoolExecutor executor);
+}
+```
+
+### 原理
+
+
+
+
+
+# 引用
+
+## 分类
+
+Java引用可分为强引用，软引用，弱引用和虚引用。
+
+为甚要用这种划分呢？是为了能够使java对象的内存回收变得更加灵活、可控。
+
+### 强引用
+
+
+
+普通的java对象都是强引用，比如new一个新对象。
+
+**强引用**是使用最普遍的引用。如果一个对象具有强引用，那**垃圾回收器**绝不会回收它。如下：
+
+
+
+### 软引用
+
+**不够才会收。**
+
+如果一个对象只具有**软引用**，则**内存空间充足**时，**垃圾回收器**就**不会**回收它；如果**内存空间不足**了，就会**回收**这些对象的内存。
+
+### 弱引用
+
+**够不够都回收。**
+
+弱引用与软引用的区别在于：只具有弱引用的对象拥有更短暂的生命周期。在垃圾回收器线程扫描它所管辖的内存区域的过程中，一旦发现了只具有弱引用的对象，不管当前内存空间足够与否，都会回收它的内存。不过，由于垃圾回收器是一个优先级很低的线程，因此不一定会很快发现那些只具有弱引用的对象。
+
+### 虚引用
+
+**虚引用**顾名思义，就是**形同虚设**。与其他几种引用都不同，**虚引用**并**不会**决定对象的**生命周期**。如果一个对象**仅持有虚引用**，那么它就和**没有任何引用**一样，在任何时候都可能被垃圾回收器回收。
+
+
+
+
+
 # Java同步机制
 
 ## 概述
 
 可以分为内置锁、显示锁（lock）、volatile及原子变量
 同步的重点在于保证共享对象的内存可见性、对共享操作的原子性及有序性
+
+## ThreadLocal
+
+原理：
+
+Thread类内部有个字段threadLocals可以以键值对的方式存储线程独立的变量或值。ThreadLocalMap内部是一个数组用来缓存变量(类似hashmap)。Entry
+
+```java
+// Thread.java里的字段
+ThreadLocal.ThreadLocalMap threadLocals = null;
+```
+
+Entry的key是一个软引用，value是强引用，key如果被回收掉，value会造成gc无法回收，因为存在Thread->threadLocals->value这样的强引用，索引对于Key为null的情况需要对value进行处理；
+
+但是jdk内部在get或者set会定时清理key为null的情况，比如getEntryAfterMiss等方法的调用；
+
+但是这样无法完全保证能清理干净，因为如果提前找到相应的key或者很久不去操作就又会有内存泄漏的可能。
+
+```java
+// ThreadLocal.java里的ThreadLocalMap实现
+// 初始化Entry数组，不过这里需要注意的是entry是一个弱引用
+ThreadLocalMap(ThreadLocal<?> firstKey, Object firstValue) {
+  table = new Entry[INITIAL_CAPACITY];
+  int i = firstKey.threadLocalHashCode & (INITIAL_CAPACITY - 1);
+  table[i] = new Entry(firstKey, firstValue);
+  size = 1;
+  setThreshold(INITIAL_CAPACITY);
+}
+```
+
+get	
+
+```java
+public T get() {
+    Thread t = Thread.currentThread();
+    ThreadLocalMap map = getMap(t);
+    if (map != null) {
+        ThreadLocalMap.Entry e = map.getEntry(this);
+        if (e != null) {
+            @SuppressWarnings("unchecked")
+            T result = (T)e.value;
+            return result;
+        }
+    }
+  	// 初始化threadlocalmap
+    return setInitialValue();
+}
+
+private T setInitialValue() {
+  T value = initialValue();
+  Thread t = Thread.currentThread();
+  ThreadLocalMap map = getMap(t);
+  if (map != null)
+    map.set(this, value);
+  else
+    // 创建threadlocal
+    createMap(t, value);
+  return value;
+}
+
+void createMap(Thread t, T firstValue) {
+  t.threadLocals = new ThreadLocalMap(this, firstValue);
+}
+
+static class Entry extends WeakReference<ThreadLocal<?>> {
+  /** The value associated with this ThreadLocal. */
+  Object value;
+
+  Entry(ThreadLocal<?> k, Object v) {
+    super(k);
+    value = v;
+  }
+}
+```
+
+set	
+
+```java
+public void set(T value) {
+    Thread t = Thread.currentThread();
+    ThreadLocalMap map = getMap(t);
+    if (map != null)
+        map.set(this, value);
+    else
+        createMap(t, value);
+}
+```
+
+可能出现的问题：
+
+a.initValue为空的情况。
+
+b.内存泄漏
+
+我们能够认识到ThreadLocal事实上是与线程绑定的一个变量，如此就会出现一个问题：假设没有将ThreadLocal内的变量删除（remove）或替换，它的生命周期将会与线程共存,如果不remove掉，很可能会出现**内存泄漏**的问题。
+
+参考：
+
+https://blog.csdn.net/vicoqi/article/details/79743112
+
+https://www.cnblogs.com/huxipeng/p/9289191.html
 
 ## volatile
 
@@ -742,6 +1002,16 @@ private void setHeadAndPropagate(Node node, int propagate) {
 
 
 ### 公平与非公平
+
+
+
+## CAS
+
+
+
+cas是一种乐观锁，jdk内部有很多使用此机制实现同步的类和工具，Unsafe类是cas的主体实现类。基于unsafe类实现锁的场景有很多，比如java.util.concurrent.atomic.AtomicInteger/java.util.concurrent.atomic.AtomicReference等工具类。
+
+
 
 
 
