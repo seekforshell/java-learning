@@ -354,7 +354,7 @@ final V putVal(K key, V value, boolean onlyIfAbsent) {
 
 
 
-### 初始化
+### 综述
 
 
 
@@ -413,11 +413,288 @@ public interface RejectedExecutionHandler {
 }
 ```
 
-### 原理
+综述：
+
+ctl关于状态位的描述：
+
+clt将高3bit保留为状态位，表示线程池的状态，初始化为RUNNING。低29bit表示能够提交的线程个数。
+
+![image-20200923095805364](images/ctl.png)
+
+```java
+private final AtomicInteger ctl = new AtomicInteger(ctlOf(RUNNING, 0));
+private static final int COUNT_BITS = Integer.SIZE - 3;
+private static final int CAPACITY   = (1 << COUNT_BITS) - 1;
+ // runState is stored in the high-order bits
+private static final int RUNNING    = -1 << COUNT_BITS; // 高三比特位：111
+private static final int SHUTDOWN   =  0 << COUNT_BITS; // 000
+private static final int STOP       =  1 << COUNT_BITS; // 001
+private static final int TIDYING    =  2 << COUNT_BITS; // 010
+private static final int TERMINATED =  3 << COUNT_BITS; // 011
+```
 
 
 
+#### 线程状态解读
 
+| 状态       | 描述                                                   |      |
+| ---------- | ------------------------------------------------------ | ---- |
+| RUNNING    | 接受新任务提交，处理工作队列中的任务                   |      |
+| SHUTDOWN   | 不接受新任务提交，处理工作队列中的任务                 |      |
+| STOP       | 不接受新任务提交，不处理队列中的任务，中断处理中的任务 |      |
+| TIDYING    | 所有任务已经停止，workcount=0                          |      |
+| TERMINATED | 线程池终止                                             |      |
+
+ThreadPoolExecutor主要实现了以下接口，包括提交任务、停止任务等。下面会逐个分析：
+
+```java
+package java.util.concurrent;
+import java.util.List;
+import java.util.Collection;
+
+public interface ExecutorService extends Executor {
+
+  	// 停止任务
+    void shutdown();
+
+    List<Runnable> shutdownNow();
+
+    boolean isShutdown();
+
+    boolean isTerminated();
+
+    boolean awaitTermination(long timeout, TimeUnit unit)
+        throws InterruptedException;
+
+    <T> Future<T> submit(Callable<T> task);
+
+    <T> Future<T> submit(Runnable task, T result);
+
+    Future<?> submit(Runnable task);
+
+    <T> List<Future<T>> invokeAll(Collection<? extends Callable<T>> tasks)
+        throws InterruptedException;
+
+    <T> T invokeAny(Collection<? extends Callable<T>> tasks)
+        throws InterruptedException, ExecutionException;
+
+    <T> T invokeAny(Collection<? extends Callable<T>> tasks,
+                    long timeout, TimeUnit unit)
+        throws InterruptedException, ExecutionException, TimeoutException;
+}
+
+public interface Executor {
+
+    /**
+     * Executes the given command at some time in the future.  The command
+     * may execute in a new thread, in a pooled thread, or in the calling
+     * thread, at the discretion of the {@code Executor} implementation.
+     *
+     * @param command the runnable task
+     * @throws RejectedExecutionException if this task cannot be
+     * accepted for execution
+     * @throws NullPointerException if command is null
+     */
+    void execute(Runnable command);
+}
+```
+
+
+
+#### 设计思想
+
+
+
+### 源代码
+
+#### 数据结构
+
+Worker类继承了AbstractQueuedSynchronizer，实现了互斥锁的功能。主要是控制线程为否可以被中断。firstTask为空可以表示当前线程是否空闲。runWorker主体流程是线程处理的主体流程
+
+```java
+private final class Worker
+    extends AbstractQueuedSynchronizer
+    implements Runnable
+{
+    /** Thread this worker is running in.  Null if factory fails. */
+    final Thread thread;
+    /** Initial task to run.  Possibly null. */
+    Runnable firstTask;
+    /** Per-thread task counter */
+    volatile long completedTasks;
+
+    Worker(Runnable firstTask) {
+        setState(-1); // inhibit interrupts until runWorker
+        this.firstTask = firstTask;
+        this.thread = getThreadFactory().newThread(this);
+    }
+
+    /** Delegates main run loop to outer runWorker  */
+    public void run() {
+        runWorker(this);
+    }
+		...
+}
+```
+
+
+
+#### execute
+
+执行实现Runnable的线程。
+
+```java
+public void execute(Runnable command) {
+    if (command == null)
+        throw new NullPointerException();
+    // 如果工作线程数小于核心线程数则添加工作线程
+    int c = ctl.get();
+    if (workerCountOf(c) < corePoolSize) {
+        if (addWorker(command, true))
+            return;
+        c = ctl.get();
+    }
+    if (isRunning(c) && workQueue.offer(command)) {
+        int recheck = ctl.get();
+        if (! isRunning(recheck) && remove(command))
+            reject(command);
+        else if (workerCountOf(recheck) == 0)
+            addWorker(null, false);
+    }
+    else if (!addWorker(command, false))
+        reject(command);
+}
+```
+
+##### addWorker
+
+添加工作线程主体逻辑。参数core表示是否添加核心线程以外的线程。
+
+这里主体逻辑可以分为两个阶段：
+
+a.workercount计数修改。这里用到了cas机制
+
+b.添加工作线程到hashset中
+
+```java
+private boolean addWorker(Runnable firstTask, boolean core) {
+    retry:
+    for (;;) {
+        int c = ctl.get();
+        int rs = runStateOf(c);
+
+        // Check if queue empty only if necessary.
+        if (rs >= SHUTDOWN &&
+            ! (rs == SHUTDOWN &&
+               firstTask == null &&
+               ! workQueue.isEmpty()))
+            return false;
+
+        for (;;) {
+            int wc = workerCountOf(c);
+            if (wc >= CAPACITY ||
+                wc >= (core ? corePoolSize : maximumPoolSize))
+                return false;
+            if (compareAndIncrementWorkerCount(c))
+                break retry;
+            c = ctl.get();  // Re-read ctl
+            if (runStateOf(c) != rs)
+                continue retry;
+            // else CAS failed due to workerCount change; retry inner loop
+        }
+    }
+
+    boolean workerStarted = false;
+    boolean workerAdded = false;
+    Worker w = null;
+    try {
+        w = new Worker(firstTask);
+        final Thread t = w.thread;
+        if (t != null) {
+            final ReentrantLock mainLock = this.mainLock;
+            mainLock.lock();
+            try {
+                // Recheck while holding lock.
+                // Back out on ThreadFactory failure or if
+                // shut down before lock acquired.
+                int rs = runStateOf(ctl.get());
+
+                if (rs < SHUTDOWN ||
+                    (rs == SHUTDOWN && firstTask == null)) {
+                    if (t.isAlive()) // precheck that t is startable
+                        throw new IllegalThreadStateException();
+                    workers.add(w);
+                    int s = workers.size();
+                    if (s > largestPoolSize)
+                        largestPoolSize = s;
+                    workerAdded = true;
+                }
+            } finally {
+                mainLock.unlock();
+            }
+            if (workerAdded) {
+              	// 运行工作线程 见runWorker流程
+                t.start();
+                workerStarted = true;
+            }
+        }
+    } finally {
+        if (! workerStarted)
+            addWorkerFailed(w);
+    }
+    return workerStarted;
+}
+```
+
+##### runWorker
+
+运行工作线程主体逻辑。如果worker中的task为空，则从队列中取，在lock之前线程是可以被打断的。
+
+```java
+final void runWorker(Worker w) {
+    Thread wt = Thread.currentThread();
+    Runnable task = w.firstTask;
+    w.firstTask = null;
+    w.unlock(); // allow interrupts
+    boolean completedAbruptly = true;
+    try {
+        while (task != null || (task = getTask()) != null) {
+            w.lock();
+            // If pool is stopping, ensure thread is interrupted;
+            // if not, ensure thread is not interrupted.  This
+            // requires a recheck in second case to deal with
+            // shutdownNow race while clearing interrupt
+            if ((runStateAtLeast(ctl.get(), STOP) ||
+                 (Thread.interrupted() &&
+                  runStateAtLeast(ctl.get(), STOP))) &&
+                !wt.isInterrupted())
+                wt.interrupt();
+            try {
+                beforeExecute(wt, task);
+                Throwable thrown = null;
+                try {
+                    task.run();
+                } catch (RuntimeException x) {
+                    thrown = x; throw x;
+                } catch (Error x) {
+                    thrown = x; throw x;
+                } catch (Throwable x) {
+                    thrown = x; throw new Error(x);
+                } finally {
+                    afterExecute(task, thrown);
+                }
+            } finally {
+                task = null;
+                w.completedTasks++;
+                w.unlock();
+            }
+        }
+        completedAbruptly = false;
+    } finally {
+        processWorkerExit(w, completedAbruptly);
+    }
+}
+```
 
 # 引用
 
