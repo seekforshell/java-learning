@@ -1151,9 +1151,226 @@ https://blog.csdn.net/Taylar_where/article/details/90547570
 
 
 
+## Spring MVC
 
 
 
+DispatcherServlet
+
+doDispatch
+
+```java
+	protected void doDispatch(HttpServletRequest request, HttpServletResponse response) throws Exception {
+		HttpServletRequest processedRequest = request;
+		HandlerExecutionChain mappedHandler = null;
+		boolean multipartRequestParsed = false;
+
+		WebAsyncManager asyncManager = WebAsyncUtils.getAsyncManager(request);
+
+		try {
+			ModelAndView mv = null;
+			Exception dispatchException = null;
+
+			try {
+				processedRequest = checkMultipart(request);
+				multipartRequestParsed = (processedRequest != request);
+
+				// Determine handler for the current request.
+				mappedHandler = getHandler(processedRequest);
+				if (mappedHandler == null || mappedHandler.getHandler() == null) {
+					noHandlerFound(processedRequest, response);
+					return;
+				}
+
+				// Determine handler adapter for the current request.
+				HandlerAdapter ha = getHandlerAdapter(mappedHandler.getHandler());
+
+				// Process last-modified header, if supported by the handler.
+				String method = request.getMethod();
+				boolean isGet = "GET".equals(method);
+				if (isGet || "HEAD".equals(method)) {
+					long lastModified = ha.getLastModified(request, mappedHandler.getHandler());
+					if (logger.isDebugEnabled()) {
+						logger.debug("Last-Modified value for [" + getRequestUri(request) + "] is: " + lastModified);
+					}
+					if (new ServletWebRequest(request, response).checkNotModified(lastModified) && isGet) {
+						return;
+					}
+				}
+
+				if (!mappedHandler.applyPreHandle(processedRequest, response)) {
+					return;
+				}
+
+				// Actually invoke the handler.
+				mv = ha.handle(processedRequest, response, mappedHandler.getHandler());
+
+				if (asyncManager.isConcurrentHandlingStarted()) {
+					return;
+				}
+
+				applyDefaultViewName(processedRequest, mv);
+				mappedHandler.applyPostHandle(processedRequest, response, mv);
+			}
+			catch (Exception ex) {
+				dispatchException = ex;
+			}
+			catch (Throwable err) {
+				// As of 4.3, we're processing Errors thrown from handler methods as well,
+				// making them available for @ExceptionHandler methods and other scenarios.
+				dispatchException = new NestedServletException("Handler dispatch failed", err);
+			}
+			processDispatchResult(processedRequest, response, mappedHandler, mv, dispatchException);
+		}
+		catch (Exception ex) {
+			triggerAfterCompletion(processedRequest, response, mappedHandler, ex);
+		}
+		catch (Throwable err) {
+			triggerAfterCompletion(processedRequest, response, mappedHandler,
+					new NestedServletException("Handler processing failed", err));
+		}
+		finally {
+			if (asyncManager.isConcurrentHandlingStarted()) {
+				// Instead of postHandle and afterCompletion
+				if (mappedHandler != null) {
+					mappedHandler.applyAfterConcurrentHandlingStarted(processedRequest, response);
+				}
+			}
+			else {
+				// Clean up any resources used by a multipart request.
+				if (multipartRequestParsed) {
+					cleanupMultipart(processedRequest);
+				}
+			}
+		}
+	}
+```
+
+
+
+RequestMappingHandlerMapping
+
+此类是一个重要的handler类
+
+```java
+public void afterPropertiesSet() {
+   this.config = new RequestMappingInfo.BuilderConfiguration();
+   this.config.setUrlPathHelper(getUrlPathHelper());
+   this.config.setPathMatcher(getPathMatcher());
+   this.config.setSuffixPatternMatch(this.useSuffixPatternMatch);
+   this.config.setTrailingSlashMatch(this.useTrailingSlashMatch);
+   this.config.setRegisteredSuffixPatternMatch(this.useRegisteredSuffixPatternMatch);
+   this.config.setContentNegotiationManager(getContentNegotiationManager());
+	// 初始化mapping
+   super.afterPropertiesSet();
+}
+```
+
+
+
+```java
+protected void initHandlerMethods() {
+   if (logger.isDebugEnabled()) {
+      logger.debug("Looking for request mappings in application context: " + getApplicationContext());
+   }
+   String[] beanNames = (this.detectHandlerMethodsInAncestorContexts ?
+         BeanFactoryUtils.beanNamesForTypeIncludingAncestors(getApplicationContext(), Object.class) :
+         getApplicationContext().getBeanNamesForType(Object.class));
+
+   for (String beanName : beanNames) {
+      if (!beanName.startsWith(SCOPED_TARGET_NAME_PREFIX)) {
+         Class<?> beanType = null;
+         try {
+            beanType = getApplicationContext().getType(beanName);
+         }
+         catch (Throwable ex) {
+            // An unresolvable bean type, probably from a lazy bean - let's ignore it.
+            if (logger.isDebugEnabled()) {
+               logger.debug("Could not resolve target class for bean with name '" + beanName + "'", ex);
+            }
+         }
+         // 判断是否有@Controller或者@RequestMapping注解
+         if (beanType != null && isHandler(beanType)) {
+           	// 注册
+            detectHandlerMethods(beanName);
+         }
+      }
+   }
+   handlerMethodsInitialized(getHandlerMethods());
+}
+
+	protected boolean isHandler(Class<?> beanType) {
+		return (AnnotatedElementUtils.hasAnnotation(beanType, Controller.class) ||
+				AnnotatedElementUtils.hasAnnotation(beanType, RequestMapping.class));
+	}
+```
+
+
+
+
+
+detectHandlerMethods
+
+```java
+/**
+ * Look for handler methods in a handler.
+ * @param handler the bean name of a handler or a handler instance
+ */
+protected void detectHandlerMethods(final Object handler) {
+   Class<?> handlerType = (handler instanceof String ?
+         getApplicationContext().getType((String) handler) : handler.getClass());
+   final Class<?> userType = ClassUtils.getUserClass(handlerType);
+
+   // 获取此类的所有方法：键为方法，值为方法的mappinginfo信息
+   Map<Method, T> methods = MethodIntrospector.selectMethods(userType,
+         new MethodIntrospector.MetadataLookup<T>() {
+            @Override
+            public T inspect(Method method) {
+               try {
+                  return getMappingForMethod(method, userType);
+               }
+               catch (Throwable ex) {
+                  throw new IllegalStateException("Invalid mapping on handler class [" +
+                        userType.getName() + "]: " + method, ex);
+               }
+            }
+         });
+
+   if (logger.isDebugEnabled()) {
+      logger.debug(methods.size() + " request handler methods found on " + userType + ": " + methods);
+   }
+   for (Map.Entry<Method, T> entry : methods.entrySet()) {
+      Method invocableMethod = AopUtils.selectInvocableMethod(entry.getKey(), userType);
+      T mapping = entry.getValue();
+     	// 注册方法
+      registerHandlerMethod(handler, invocableMethod, mapping);
+   }
+}
+```
+
+RequestMappingHandlerMapping#getMappingForMethod
+
+
+
+```java
+protected RequestMappingInfo getMappingForMethod(Method method, Class<?> handlerType) {
+   RequestMappingInfo info = createRequestMappingInfo(method);
+   if (info != null) {
+      RequestMappingInfo typeInfo = createRequestMappingInfo(handlerType);
+      if (typeInfo != null) {
+         info = typeInfo.combine(info);
+      }
+   }
+   return info;
+}
+
+private RequestMappingInfo createRequestMappingInfo(AnnotatedElement element) {
+  RequestMapping requestMapping = AnnotatedElementUtils.findMergedAnnotation(element, RequestMapping.class);
+  RequestCondition<?> condition = (element instanceof Class ?
+                                   getCustomTypeCondition((Class<?>) element) : getCustomMethodCondition((Method) element));
+  return (requestMapping != null ? createRequestMappingInfo(requestMapping, condition) : null);
+}
+```
 
 ## Spring 框架
 
