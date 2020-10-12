@@ -52,3 +52,7 @@ syncLimit=2
 
 ![image-20200916230140116](images\image-20200916230140116.png)
 
+## Paxos算法
+
+
+

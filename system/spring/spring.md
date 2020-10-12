@@ -1356,6 +1356,7 @@ RequestMappingHandlerMapping#getMappingForMethod
 protected RequestMappingInfo getMappingForMethod(Method method, Class<?> handlerType) {
    RequestMappingInfo info = createRequestMappingInfo(method);
    if (info != null) {
+     	// 创建mappinginfo信息
       RequestMappingInfo typeInfo = createRequestMappingInfo(handlerType);
       if (typeInfo != null) {
          info = typeInfo.combine(info);
@@ -1365,10 +1366,31 @@ protected RequestMappingInfo getMappingForMethod(Method method, Class<?> handler
 }
 
 private RequestMappingInfo createRequestMappingInfo(AnnotatedElement element) {
+  // 找到requestmapping注解
   RequestMapping requestMapping = AnnotatedElementUtils.findMergedAnnotation(element, RequestMapping.class);
   RequestCondition<?> condition = (element instanceof Class ?
                                    getCustomTypeCondition((Class<?>) element) : getCustomMethodCondition((Method) element));
   return (requestMapping != null ? createRequestMappingInfo(requestMapping, condition) : null);
+}
+```
+
+
+
+```java
+protected RequestMappingInfo createRequestMappingInfo(
+      RequestMapping requestMapping, RequestCondition<?> customCondition) {
+
+   return RequestMappingInfo
+         .paths(resolveEmbeddedValuesInPatterns(requestMapping.path()))
+         .methods(requestMapping.method())
+         .params(requestMapping.params())
+         .headers(requestMapping.headers())
+         .consumes(requestMapping.consumes())
+         .produces(requestMapping.produces())
+         .mappingName(requestMapping.name())
+         .customCondition(customCondition)
+         .options(this.config)
+         .build();
 }
 ```
 

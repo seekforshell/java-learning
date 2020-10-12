@@ -600,7 +600,7 @@ typedef struct {
 
 
 
-![arch](M:\github\java-learning\system\redis\images\redis-arch.png)
+![arch](images\redis-arch.png)
 
 ### 客户端请求流程
 
