@@ -72,6 +72,389 @@ https://www.jianshu.com/p/db8dce09232d
 
 ## 队列
 
+### 同步队列
+
+#### 基本原理
+
+SynchronousQueue是一个很有意思的队列，号称实现无锁同步，内部不存储任何元素，仅仅借助节点的状态和cas操作实现同步，假如没有消费者消费，也会造成生产者睡眠
+
+下图是我示例程序head的一个镜像信息，从这里可以看出同步队里并不是不存信息，而是放到了栈中或者队列中。
+
+```java
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.SynchronousQueue;
+
+/**
+ * @author: yujingzhi
+ * Version: 1.0
+ */
+public class TaskExecutor {
+    private SynchronousQueue<String> queue = new SynchronousQueue();
+    private static ExecutorService executorService = Executors.newFixedThreadPool(2);
+    private List<String> data = Arrays.asList("a", "b");
+
+    public void doAction() {
+        for (int i =0; i<2; i++) {
+            executorService.submit(new TaskEntry(i));
+        }
+    }
+
+    class TaskEntry implements Runnable {
+        private int loop;
+        TaskEntry (int i) {
+            loop = i;
+        }
+        public void run() {
+            try {
+                queue.put(data.get(loop));
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
+```
+
+<img src="images/image-20201014102753802.png" alt="image-20201014102753802" style="zoom: 50%;" />
+
+#### 实现原理
+
+同步队列的take和put的操作区别在于传入对数据，一个是null一个是真实的数据e，transfer方法根据其来决定是REQUEST模式或者DATA模式。
+
+tansferer有两种实现。一种TransferStack(LIFO)，一种是TransferQueue(FIFO)
+
+```java
+// take
+public E take() throws InterruptedException {
+  E e = transferer.transfer(null, false, 0);
+  if (e != null)
+    return e;
+  Thread.interrupted();
+  throw new InterruptedException();
+}
+// put
+public void put(E e) throws InterruptedException {
+    if (e == null) throw new NullPointerException();
+    if (transferer.transfer(e, false, 0) == null) {
+        Thread.interrupted();
+        throw new InterruptedException();
+    }
+}
+```
+
+下面以TransferStack的实现来进行分析，TransferQueue原理类似。
+
+transfer代码的分析，需要理解FULFILLING的概念，当栈中有数据，当前的take操作则为fullfiling，之前的put则awaitFulfill，反之亦然。
+
+也就是说生产数据和消费数据的线程在同步队列中互为顾客，都有需求和满足需求的角色。
+
+栈/队列中node的三种角色。
+
+```java
+/* Modes for SNodes, ORed together in node fields */
+/** Node represents an unfulfilled consumer */
+static final int REQUEST    = 0;
+/** Node represents an unfulfilled producer */
+static final int DATA       = 1;
+/** Node is fulfilling another unfulfilled DATA or REQUEST */
+static final int FULFILLING = 2;
+```
+
+核心代码逻辑transfer实现流程分析：
+
+```java
+/**
+ * Puts or takes an item.
+ */
+@SuppressWarnings("unchecked")
+E transfer(E e, boolean timed, long nanos) {
+    /*
+     * Basic algorithm is to loop trying one of three actions:
+     *
+     * 1. If apparently empty or already containing nodes of same
+     *    mode, try to push node on stack and wait for a match,
+     *    returning it, or null if cancelled.
+     *
+     * 2. If apparently containing node of complementary mode,
+     *    try to push a fulfilling node on to stack, match
+     *    with corresponding waiting node, pop both from
+     *    stack, and return matched item. The matching or
+     *    unlinking might not actually be necessary because of
+     *    other threads performing action 3:
+     *
+     * 3. If top of stack already holds another fulfilling node,
+     *    help it out by doing its match and/or pop
+     *    operations, and then continue. The code for helping
+     *    is essentially the same as for fulfilling, except
+     *    that it doesn't return the item.
+     */
+
+    SNode s = null; // constructed/reused as needed
+  	// 如果是take则mode为request,put则为data
+    int mode = (e == null) ? REQUEST : DATA;
+
+    for (;;) {
+        SNode h = head;
+      	// 1.如果栈中为空或者栈顶都为put或者request操作：此情形适用于连续take或者put的场景。
+      	// 2.条件不成立时，说明之前的请求模式必然和自己的不同，也就是说上一个请求必然是'顾客'
+        if (h == null || h.mode == mode) {  // empty or same-mode
+            if (timed && nanos <= 0) {      // can't wait
+                if (h != null && h.isCancelled())
+                    casHead(h, h.next);     // pop cancelled node
+                else
+                    return null;
+            } else if (casHead(h, s = snode(s, e, h, mode))) {
+                SNode m = awaitFulfill(s, timed, nanos);
+                if (m == s) {               // wait was cancelled
+                    clean(s);
+                    return null;
+                }
+                if ((h = head) != null && h.next == s)
+                    casHead(h, s.next);     // help s's fulfiller
+                return (E) ((mode == REQUEST) ? m.item : s.item);
+            }
+         
+        } // 此步骤的主要作用是设置当前节点为 FULFILLING，不过需要首选判断下当前head是否已经是fulfill状态（考虑并发情况，如果是则先帮其设置matcher）
+      	else if (!isFulfilling(h.mode)) { // try to fulfill
+            if (h.isCancelled())            // already cancelled
+                casHead(h, h.next);         // pop and retry
+          	// 入栈，并设置mode为FULFILLING，使‘顾客’在awaitFulfill时得到满足
+            else if (casHead(h, s=snode(s, e, h, FULFILLING|mode))) {
+                for (;;) { // loop until matched or waiters disappear
+                    SNode m = s.next;       // m is s's match
+                    if (m == null) {        // all waiters are gone
+                        casHead(s, null);   // pop fulfill node
+                        s = null;           // use new node next time
+                        break;              // restart main loop
+                    }
+                    SNode mn = m.next;
+                  	// 设置'顾客'匹配到的matcher：数据，如果'顾客'超时进行了park则unpark
+                    if (m.tryMatch(s)) {
+                        casHead(s, mn);     // pop both s and m
+                        return (E) ((mode == REQUEST) ? m.item : s.item);
+                    } else                  // lost match
+                        s.casNext(m, mn);   // help unlink
+                }
+            }
+        } else {                            // help a fulfiller
+            SNode m = h.next;               // m is h's match
+            if (m == null)                  // waiter is gone
+                casHead(h, null);           // pop fulfilling node
+            else {
+                SNode mn = m.next;
+                if (m.tryMatch(h))          // help match
+                    casHead(h, mn);         // pop both h and m
+                else                        // lost match
+                    h.casNext(m, mn);       // help unlink
+            }
+        }
+    }
+}
+```
+
+tryMatch
+
+```java
+boolean tryMatch(SNode s) {
+    if (match == null &&
+        UNSAFE.compareAndSwapObject(this, matchOffset, null, s)) {
+        Thread w = waiter;
+        if (w != null) {    // waiters need at most one unpark
+            waiter = null;
+            LockSupport.unpark(w);
+        }
+        return true;
+    }
+    return match == s;
+}
+```
+
+等待满足的生成者出现，返回数据，自旋一定时间后睡眠。
+
+```java
+
+SNode awaitFulfill(SNode s, boolean timed, long nanos) {
+    final long deadline = timed ? System.nanoTime() + nanos : 0L;
+    Thread w = Thread.currentThread();
+    int spins = (shouldSpin(s) ?
+                 (timed ? maxTimedSpins : maxUntimedSpins) : 0);
+    for (;;) {
+        if (w.isInterrupted())
+            s.tryCancel();
+      	// 有匹配到的matcher则返回
+        SNode m = s.match;
+        if (m != null)
+            return m;
+        if (timed) {
+            nanos = deadline - System.nanoTime();
+            if (nanos <= 0L) {
+                s.tryCancel();
+                continue;
+            }
+        }
+      	// 先自旋，自旋一定次数后park
+        if (spins > 0)
+            spins = shouldSpin(s) ? (spins-1) : 0;
+        else if (s.waiter == null)
+            s.waiter = w; // establish waiter so can park next iter
+        else if (!timed)
+            LockSupport.park(this);
+        else if (nanos > spinForTimeoutThreshold)
+            LockSupport.parkNanos(this, nanos);
+    }
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+### 阻塞队列
+
+想要了解什么是阻塞队列，其实现了什么功能？最好了解下其实现的接口定义：
+
+| 方法                                                         | 是否阻塞 | 说明                 |
+| ------------------------------------------------------------ | -------- | -------------------- |
+| boolean add(E e)                                             | N        | 违反空间大小时会报错 |
+| boolean offer(E e)                                           | N        |                      |
+| boolean offer(E e, long timeout, TimeUnit unit)<br/>        throws InterruptedException | N        | 超时机制             |
+| void put(E e) throws InterruptedException                    | Y        | 添加队列元素         |
+| E take() throws InterruptedException                         | Y        | 获取队列元素         |
+| E poll(long timeout, TimeUnit unit)<br/>        throws InterruptedException | N        | 支持轮询             |
+
+
+
+```
+public interface BlockingQueue<E> extends Queue<E> {
+
+    boolean add(E e);
+
+    boolean offer(E e);
+
+    /** 添加时阻塞
+     * Inserts the specified element into this queue, waiting if necessary
+     * for space to become available.
+     *
+     * @param e the element to add
+     * @throws InterruptedException if interrupted while waiting
+     * @throws ClassCastException if the class of the specified element
+     *         prevents it from being added to this queue
+     * @throws NullPointerException if the specified element is null
+     * @throws IllegalArgumentException if some property of the specified
+     *         element prevents it from being added to this queue
+     */
+    void put(E e) throws InterruptedException;
+
+    /**
+    	添加，支持超时机制
+     * Inserts the specified element into this queue, waiting up to the
+     * specified wait time if necessary for space to become available.
+     *
+     * @param e the element to add
+     * @param timeout how long to wait before giving up, in units of
+     *        {@code unit}
+     * @param unit a {@code TimeUnit} determining how to interpret the
+     *        {@code timeout} parameter
+     * @return {@code true} if successful, or {@code false} if
+     *         the specified waiting time elapses before space is available
+     * @throws InterruptedException if interrupted while waiting
+     * @throws ClassCastException if the class of the specified element
+     *         prevents it from being added to this queue
+     * @throws NullPointerException if the specified element is null
+     * @throws IllegalArgumentException if some property of the specified
+     *         element prevents it from being added to this queue
+     */
+    boolean offer(E e, long timeout, TimeUnit unit)
+        throws InterruptedException;
+
+    /** 阻塞获取
+     * Retrieves and removes the head of this queue, waiting if necessary
+     * until an element becomes available.
+     *
+     * @return the head of this queue
+     * @throws InterruptedException if interrupted while waiting
+     */
+    E take() throws InterruptedException;
+
+    /** 超时获取
+     * Retrieves and removes the head of this queue, waiting up to the
+     * specified wait time if necessary for an element to become available.
+     *
+     * @param timeout how long to wait before giving up, in units of
+     *        {@code unit}
+     * @param unit a {@code TimeUnit} determining how to interpret the
+     *        {@code timeout} parameter
+     * @return the head of this queue, or {@code null} if the
+     *         specified waiting time elapses before an element is available
+     * @throws InterruptedException if interrupted while waiting
+     */
+    E poll(long timeout, TimeUnit unit)
+        throws InterruptedException;
+
+    /**
+     * Returns the number of additional elements that this queue can ideally
+     * (in the absence of memory or resource constraints) accept without
+     * blocking, or {@code Integer.MAX_VALUE} if there is no intrinsic
+     * limit.
+     *
+     * <p>Note that you <em>cannot</em> always tell if an attempt to insert
+     * an element will succeed by inspecting {@code remainingCapacity}
+     * because it may be the case that another thread is about to
+     * insert or remove an element.
+     *
+     * @return the remaining capacity
+     */
+    int remainingCapacity();
+
+    /**
+     * Removes a single instance of the specified element from this queue,
+     * if it is present.  More formally, removes an element {@code e} such
+     * that {@code o.equals(e)}, if this queue contains one or more such
+     * elements.
+     * Returns {@code true} if this queue contained the specified element
+     * (or equivalently, if this queue changed as a result of the call).
+     *
+     * @param o element to be removed from this queue, if present
+     * @return {@code true} if this queue changed as a result of the call
+     * @throws ClassCastException if the class of the specified element
+     *         is incompatible with this queue
+     *         (<a href="../Collection.html#optional-restrictions">optional</a>)
+     * @throws NullPointerException if the specified element is null
+     *         (<a href="../Collection.html#optional-restrictions">optional</a>)
+     */
+    boolean remove(Object o);
+
+    /**
+     * Returns {@code true} if this queue contains the specified element.
+     * More formally, returns {@code true} if and only if this queue contains
+     * at least one element {@code e} such that {@code o.equals(e)}.
+     *
+     * @param o object to be checked for containment in this queue
+     * @return {@code true} if this queue contains the specified element
+     * @throws ClassCastException if the class of the specified element
+     *         is incompatible with this queue
+     *         (<a href="../Collection.html#optional-restrictions">optional</a>)
+     * @throws NullPointerException if the specified element is null
+     *         (<a href="../Collection.html#optional-restrictions">optional</a>)
+     */
+    public boolean contains(Object o);
+		...
+}
+```
+
+
+
 
 
 ## Map
