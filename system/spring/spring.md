@@ -1104,9 +1104,131 @@ DataSourceTransactionManager
 
 ### MyBatis启动解读
 
-深入了解mybatis执行语句的流程，对于缓存启用及与周边模块关系的理解和应用
+深入了解mybatis执行语句的流程，对于缓存启用及与周边模块关系的理解和应用。
+
+理解mybatis是如何找到mapper的实现类，有两个类非常关键。一个是MapperScannerConfigurer，此类主要是用来扫描mybatis的包路。
+
+核心实现逻辑如下，这段逻辑主要是调用ClassPathMapperScanner去解析mapper的相关实现类，在bean初始化完成之后会调用
+
+MapperFactoryBean的抽象类方法afterPropertiesSet
+
+```java
+@Override
+public void postProcessBeanDefinitionRegistry(BeanDefinitionRegistry registry) {
+  if (this.processPropertyPlaceHolders) {
+    processPropertyPlaceHolders();
+  }
+
+  ClassPathMapperScanner scanner = new ClassPathMapperScanner(registry);
+  scanner.setAddToConfig(this.addToConfig);
+  scanner.setAnnotationClass(this.annotationClass);
+  scanner.setMarkerInterface(this.markerInterface);
+  scanner.setSqlSessionFactory(this.sqlSessionFactory);
+  scanner.setSqlSessionTemplate(this.sqlSessionTemplate);
+  scanner.setSqlSessionFactoryBeanName(this.sqlSessionFactoryBeanName);
+  scanner.setSqlSessionTemplateBeanName(this.sqlSessionTemplateBeanName);
+  scanner.setResourceLoader(this.applicationContext);
+  scanner.setBeanNameGenerator(this.nameGenerator);
+  scanner.registerFilters();
+  scanner.scan(StringUtils.tokenizeToStringArray(this.basePackage, ConfigurableApplicationContext.CONFIG_LOCATION_DELIMITERS));
+}
+```
+
+#### MapperScannerConfigurer
 
 
+
+其实现了spring的org.springframework.beans.factory.support.BeanDefinitionRegistryPostProcessor
+
+
+
+#### MapperFactoryBean
+
+此类是mybatis注册Mapper的工长类，因为其实现了spring的接口org.springframework.beans.factory.InitializingBean
+
+```java
+public class MapperFactoryBean<T> extends SqlSessionDaoSupport implements FactoryBean<T> {
+  ...
+}
+```
+
+checkDaoConfig逻辑
+
+```java
+@Override
+public final void afterPropertiesSet() throws IllegalArgumentException, BeanInitializationException {
+   // Let abstract subclasses check their configuration.
+   checkDaoConfig();
+
+   // Let concrete implementations initialize themselves.
+   try {
+      initDao();
+   }
+   catch (Exception ex) {
+      throw new BeanInitializationException("Initialization of DAO failed", ex);
+   }
+}
+```
+
+
+
+```java
+protected void checkDaoConfig() {
+  super.checkDaoConfig();
+
+  notNull(this.mapperInterface, "Property 'mapperInterface' is required");
+
+  Configuration configuration = getSqlSession().getConfiguration();
+  if (this.addToConfig && !configuration.hasMapper(this.mapperInterface)) {
+    try {
+      // 此步骤走org.apache.ibatis.session.Configuration实现
+      configuration.addMapper(this.mapperInterface);
+    } catch (Exception e) {
+      logger.error("Error while adding the mapper '" + this.mapperInterface + "' to configuration.", e);
+      throw new IllegalArgumentException(e);
+    } finally {
+      ErrorContext.instance().reset();
+    }
+  }
+}
+```
+
+org.apache.ibatis.session.Configuration实现，其mapperRegistry会有type的代理类实现
+
+```java
+public <T> void addMapper(Class<T> type) {
+  mapperRegistry.addMapper(type);
+}
+```
+
+
+
+核心代理实现为MapperProxyFactory
+
+```java
+public <T> void addMapper(Class<T> type) {
+  if (type.isInterface()) {
+    if (hasMapper(type)) {
+      throw new BindingException("Type " + type + " is already known to the MapperRegistry.");
+    }
+    boolean loadCompleted = false;
+    try {
+      // 核心代理实现
+      knownMappers.put(type, new MapperProxyFactory<T>(type));
+      // It's important that the type is added before the parser is run
+      // otherwise the binding may automatically be attempted by the
+      // mapper parser. If the type is already known, it won't try.
+      MapperAnnotationBuilder parser = new MapperAnnotationBuilder(config, type);
+      parser.parse();
+      loadCompleted = true;
+    } finally {
+      if (!loadCompleted) {
+        knownMappers.remove(type);
+      }
+    }
+  }
+}
+```
 
 ### Logging启动解读
 
