@@ -1230,6 +1230,10 @@ public <T> void addMapper(Class<T> type) {
 }
 ```
 
+#### 参考
+
+https://www.cnblogs.com/ChenLLang/p/5307590.html
+
 ### Logging启动解读
 
 

@@ -122,7 +122,18 @@ https://www.cnblogs.com/czwbig/p/11127124.html
 
 
 
+
+
 # 收集器
+
+### GC root
+
+1. 虚拟机栈(栈桢中的本地变量表)中的引用的对象 ；
+2. 方法区中的类静态属性引用的对象 ；
+3. 方法区中的常量引用的对象 ；
+4. 本地方法栈中JNI的引用的对象；
+
+### 概述
 
 几种常见回收器，红色表示标记整理算法；蓝色表示复制-整理，绿色表示标记清除
 
@@ -158,8 +169,6 @@ cms收集器内存被分为三块：
 
 #### 收集算法
 
-
-
 ##### Young GC回收流程
 
 
@@ -186,9 +195,13 @@ After a young GC, the Eden space is cleared and one of the survivor spaces is cl
 
 CMS Major gc会有两次stop the world行为：初始化标记和重标记。
 
-关于标记：
-
-(1) Initial mark is a short pause phase where live (reachable) objects are marked. (2) Concurrent marking finds live objects while the application continues to execute. Finally, in the (3) remark phase, objects are found that were missed during (2) concurrent marking in the previous phase.
+| Phase                                     | Description                                                  |
+| ----------------------------------------- | ------------------------------------------------------------ |
+| (1) Initial Mark *(Stop the World Event)* | Objects in old generation are “marked” as reachable including those objects which may be reachable from young generation. Pause times are typically short in duration relative to minor collection pause times. |
+| (2) Concurrent Marking                    | Traverse the tenured generation object graph for reachable objects concurrently while Java application threads are executing. Starts scanning from marked objects and transitively marks all objects reachable from the roots. The mutators are executing during the concurrent phases 2, 3, and 5 and any objects allocated in the CMS generation during these phases (including promoted objects) are immediately marked as live. |
+| (3) Remark *(Stop the World Event)*       | Finds objects that were missed by the concurrent mark phase due to updates by Java application threads to objects after the concurrent collector had finished tracing that object. |
+| (4) Concurrent Sweep                      | Collects the objects identified as unreachable during marking phases. The collection of a dead object adds the space for the object to a free list for later allocation. Coalescing of dead objects may occur at this point. Note that live objects are not moved. |
+| (5) Resetting                             | Prepare for next concurrent collection by clearing data structures. |
 
 <img src="images/cms-old-gc-1.png" alt="img" style="zoom:50%;" />
 
@@ -224,17 +237,66 @@ G1收集器的算法内存模型如下：G1可分为eden、survivor、old
 
 The heap is partitioned into a set of **equal-sized** heap regions, each a contiguous range of virtual memory. Certain region sets are assigned the same roles (eden, survivor, old) as in the older collectors, **but there is not a fixed size for them**. This provides greater flexibility in memory usage.
 
+#### 与CMS的区别
 
+G1是用来替换CMS收集器的，主要有两点不同：
 
+1.采用**区域**区分内存区域。可以动态计算区域大小，能够有效避免内存碎片问题
 
+2.可以由用户自定义gc的停顿时间
 
 #### 收集算法
 
-G1收集算法跟CMS是类似的。
-
-首先并发执行全局标记工作决定全局堆中有哪些存活的对象；
 
 
+##### 老年代gc
+
+| Phase                                               | Description                                                  |
+| --------------------------------------------------- | ------------------------------------------------------------ |
+| (1) Initial Mark *(Stop the World Event)*           | This is a stop the world event. With G1, it is piggybacked on **a normal young GC**. Mark survivor regions (root regions) which may have references to objects in old generation.<br/>初始化标记至少伴随一次yong gc；标记被老年代引用的区域（即根区域） |
+| (2) Root Region Scanning                            | Scan survivor regions for references into the old generation. This happens while the application continues to run. The phase must be completed before a young GC can occur. |
+| (3) Concurrent Marking                              | Find live objects over the entire heap. This happens while the application is running. This phase can be interrupted by young generation garbage collections.<br>在整个堆空间中找出存活的对象。如果有空闲区域则直接回收。 |
+| (4) Remark *(Stop the World Event)*                 | Completes the marking of live object in the heap. Uses an algorithm called snapshot-at-the-beginning (SATB) which is much faster than what was used in the CMS collector.<br> |
+| (5) Cleanup *(Stop the World Event and Concurrent)* | Performs accounting on live objects and completely free regions. (Stop the world)Scrubs the Remembered Sets. (Stop the world)Reset the empty regions and return them to the free list. (Concurrent) |
+| (*) Copying *(Stop the World Event)*                | These are the stop the world pauses to evacuate or copy live objects to new unused regions. This can be done with young generation regions which are logged as `[GC pause (young)]`. Or both young and old generation regions which are logged as `[GC Pause (mixed)]`. |
+
+###### 初始化标记
+
+初始化标记阶段会伴随一次yong gc，在gc日志中打印“GC pause (young)(inital-mark)”信息。
+
+<img src="images/image-20201019155322060.png" alt="image-20201019155322060" style="zoom:50%;" />
+
+###### 2.并发标记
+
+如果空闲区域被发现，图中**X**表示，则区域将会在重标记阶段被移除和回收。
+
+
+
+<img src="images/slide14.png" alt="img" style="zoom:67%;" />
+
+###### 3.重标记
+
+计算存活区域年龄，移除并回收空区域。
+
+Uses the Snapshot-at-the-Beginning (SATB) algorithm which is much faster then what was used with CMS
+
+
+
+<img src="images/slide15.png" alt="img" style="zoom:67%;" />
+
+###### 4.拷贝清除阶段
+
+此阶段会选择优先级最低的对象进行回收，可以同时发生yong gc和old gc。在gc日志显示为`[GC pause (mixed)]`.
+
+<img src="images/slide16.png" alt="img" style="zoom:67%;" />
+
+
+
+##### 年轻代gc
+
+初始化标记（会发生STW）的阶段，eden和survivor大小会被重新计算并在下一次yong gc时使用。存活的区域会被拷贝到一个或者多个幸存者区域中去，或者达到年龄阈值后晋升为老年代。统计信息和中断时间都会影响新生代大小。
+
+<img src="images/jvm-g1-yong-gc.png" alt="img" style="zoom:67%;" />
 
 #### 使用场景
 

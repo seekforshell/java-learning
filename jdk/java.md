@@ -769,6 +769,117 @@ final V putVal(K key, V value, boolean onlyIfAbsent) {
 
 # 多线程
 
+## 线程
+
+下面以java中的Thread.java来进行源码的剖析，通过此类的解读来了解java线程的机制和原理。
+
+### yield
+
+只是出让cpu，线程状态处于RUNNABLE状态
+
+### join
+
+join通常用来等待某个线程执行完毕后的结果，因为线程结束会调用nofity通知
+
+```java
+    public final synchronized void join(long millis)
+    throws InterruptedException {
+        long base = System.currentTimeMillis();
+        long now = 0;
+
+        if (millis < 0) {
+            throw new IllegalArgumentException("timeout value is negative");
+        }
+
+        if (millis == 0) {
+          	// 当线程退出后会继续
+            while (isAlive()) {
+                wait(0);
+            }
+        } else {
+            while (isAlive()) {
+                long delay = millis - now;
+                if (delay <= 0) {
+                    break;
+                }
+                wait(delay);
+                now = System.currentTimeMillis() - base;
+            }
+        }
+    }
+```
+
+### 线程状态
+
+
+
+![img](images/thread-status.png)
+
+```java
+public enum State {
+    /**
+     * 还未启动
+     */
+    NEW,
+
+    /**
+     * jvm中处于可以运行的状态，但是可能并没有实际执行；可能在等待cpu资源
+     */
+    RUNNABLE,
+
+    /**
+     * 主要是等待synchronized才会出现
+     * Thread state for a thread blocked waiting for a monitor lock.
+     * A thread in the blocked state is waiting for a monitor lock
+     * to enter a synchronized block/method or
+     * reenter a synchronized block/method after calling
+     * {@link Object#wait() Object.wait}.
+     */
+    BLOCKED,
+
+    /**
+     * Thread state for a waiting thread.
+     * A thread is in the waiting state due to calling one of the
+     * following methods:
+     * <ul>
+     *   <li>{@link Object#wait() Object.wait} with no timeout</li>
+     *   <li>{@link #join() Thread.join} with no timeout</li>
+     *   <li>{@link LockSupport#park() LockSupport.park}</li>
+     * </ul>
+     *
+     * <p>A thread in the waiting state is waiting for another thread to
+     * perform a particular action.
+     *
+     * For example, a thread that has called <tt>Object.wait()</tt>
+     * on an object is waiting for another thread to call
+     * <tt>Object.notify()</tt> or <tt>Object.notifyAll()</tt> on
+     * that object. A thread that has called <tt>Thread.join()</tt>
+     * is waiting for a specified thread to terminate.
+     */
+    WAITING,
+
+    /**
+     * Thread state for a waiting thread with a specified waiting time.
+     * A thread is in the timed waiting state due to calling one of
+     * the following methods with a specified positive waiting time:
+     * <ul>
+     *   <li>{@link #sleep Thread.sleep}</li>
+     *   <li>{@link Object#wait(long) Object.wait} with timeout</li>
+     *   <li>{@link #join(long) Thread.join} with timeout</li>
+     *   <li>{@link LockSupport#parkNanos LockSupport.parkNanos}</li>
+     *   <li>{@link LockSupport#parkUntil LockSupport.parkUntil}</li>
+     * </ul>
+     */
+    TIMED_WAITING,
+
+    /**
+     * Thread state for a terminated thread.
+     * The thread has completed execution.
+     */
+    TERMINATED;
+}
+```
+
 
 
 ## ThreadPoolExecutor
@@ -1273,7 +1384,7 @@ https://www.cnblogs.com/huxipeng/p/9289191.html
 
 ### 作用
 
-实现并发场景下的内码块和方法同步。可以修饰函数（静态及实例方法）及代码块；synchronized是非公平的可重入锁。
+实现并发场景下的内码块和方法同步。可以修饰函数（静态及实例方法）及代码块；synchronized是**非公平**的可重入锁。
 
 ### 原理
 
@@ -1999,7 +2110,25 @@ public final void signal() {
 
 
 
+### 概述
+
 cas是一种乐观锁，jdk内部有很多使用此机制实现同步的类和工具，Unsafe类是cas的主体实现类。基于unsafe类实现锁的场景有很多，比如java.util.concurrent.atomic.AtomicInteger/java.util.concurrent.atomic.AtomicReference等工具类。
+
+
+
+### ABA问题及解决方案
+
+加版本号的方法。
+
+
+
+## FutureTask
+
+
+
+todo
+
+futureTask是一种异步等待线程执行结果的机制。
 
 
 
