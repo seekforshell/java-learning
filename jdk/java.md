@@ -659,8 +659,6 @@ final Node<K,V>[] resize() {
 
 ### LinkedHashMap
 
-
-
 Linked相对于HashMap实现了访问有序和插入访问有序。
 
 其主要设计思想有两个方便：
@@ -699,15 +697,32 @@ Node<K,V> newNode(int hash, K key, V value, Node<K,V> e) {
 
 
 
+#### 数据结构模型
 
+JDK1.8已经抛弃了分段锁的机制，利用CAS+Synchronized的机制实现来保证并发更新的安全。数据结构采用数组、链表/红黑树的形式。
+
+那么它是如何实现更高效的并发的呢？
+
+是强一致性的吗？
+
+不是
+
+#### 源码分析
+
+##### put流程
 
 ```java
 final V putVal(K key, V value, boolean onlyIfAbsent) {
     if (key == null || value == null) throw new NullPointerException();
+  	// 计算Key的hash值
     int hash = spread(key.hashCode());
     int binCount = 0;
     for (Node<K,V>[] tab = table;;) {
         Node<K,V> f; int n, i, fh;
+      	// a.如果表未初始化先初始化，否则进行步骤b
+      	// b.查看数组中元素是否为空，为空则插入一个新的元素，否则进行步骤c
+      	// c.先判断是否处于拓容过程，是则进行拓容流程，否则进行步骤d
+      	// d.使用synchronized加锁
         if (tab == null || (n = tab.length) == 0)
             tab = initTable();
         else if ((f = tabAt(tab, i = (n - 1) & hash)) == null) {
@@ -719,6 +734,9 @@ final V putVal(K key, V value, boolean onlyIfAbsent) {
             tab = helpTransfer(tab, f);
         else {
             V oldVal = null;
+          	// 加锁，变成了synchronized;如果是并发量少的情况，为了提高响应速度使用synchronized，多了
+          	// 之后由于红黑树的自平衡可能时间比较久使用重量级锁也是可以的，而且内置锁也是一种不公平锁，能够
+          	// 较好提升响应速度
             synchronized (f) {
                 if (tabAt(tab, i) == f) {
                     if (fh >= 0) {
@@ -762,7 +780,381 @@ final V putVal(K key, V value, boolean onlyIfAbsent) {
             }
         }
     }
+  	// 计算map个数
     addCount(1L, binCount);
+    return null;
+}
+```
+
+初始化表：
+
+```java
+private final Node<K,V>[] initTable() {
+    Node<K,V>[] tab; int sc;
+  	
+    while ((tab = table) == null || tab.length == 0) {
+      	// a.sizeCtl初始化为0，当不指定map容量的时候，同时put操作会出现竞争
+      	// b.设置sizeCtl为-1加锁
+        if ((sc = sizeCtl) < 0)
+            Thread.yield(); // lost initialization race; just spin
+        else if (U.compareAndSwapInt(this, SIZECTL, sc, -1)) {
+            try {
+              	// 再次判断表是否为空？
+                if ((tab = table) == null || tab.length == 0) {
+                    int n = (sc > 0) ? sc : DEFAULT_CAPACITY;
+                    @SuppressWarnings("unchecked")
+                    Node<K,V>[] nt = (Node<K,V>[])new Node<?,?>[n];
+                  	// 初始化表大小为n
+                    table = tab = nt;
+                    sc = n - (n >>> 2);
+                }
+            } finally {
+              	// 设置拓容阈值
+                sizeCtl = sc;
+            }
+            break;
+        }
+    }
+    return tab;
+}
+```
+
+这里是添加链表元素
+
+```java
+static final <K,V> boolean casTabAt(Node<K,V>[] tab, int i,
+                                    Node<K,V> c, Node<K,V> v) {
+    return U.compareAndSwapObject(tab, ((long)i << ASHIFT) + ABASE, c, v);
+}
+```
+
+addCount
+
+```java
+private final void addCount(long x, int check) {
+    CounterCell[] as; long b, s;
+  	// couterCell为空或者有冲突时c才启用countCell，否则直接读BASECOUNT计数即可
+    if ((as = counterCells) != null ||
+        !U.compareAndSwapLong(this, BASECOUNT, b = baseCount, s = b + x)) {
+        CounterCell a; long v; int m;
+        boolean uncontended = true;
+        if (as == null || (m = as.length - 1) < 0 ||
+            (a = as[ThreadLocalRandom.getProbe() & m]) == null ||
+            !(uncontended =
+              U.compareAndSwapLong(a, CELLVALUE, v = a.value, v + x))) {
+            fullAddCount(x, uncontended);
+            return;
+        }
+        if (check <= 1)
+            return;
+        s = sumCount();
+    }
+  	// check表示hash冲突的entry个数
+    if (check >= 0) {
+        Node<K,V>[] tab, nt; int n, sc;
+      	// 当达到拓容条件进行并且小于最大容量时拓容
+        while (s >= (long)(sc = sizeCtl) && (tab = table) != null &&
+               (n = tab.length) < MAXIMUM_CAPACITY) {
+            int rs = resizeStamp(n);
+          	// 出现拓容并发
+            if (sc < 0) {
+              	// 无符号右移
+                if ((sc >>> RESIZE_STAMP_SHIFT) != rs || sc == rs + 1 ||
+                    sc == rs + MAX_RESIZERS || (nt = nextTable) == null ||
+                    transferIndex <= 0)
+                    break;
+                if (U.compareAndSwapInt(this, SIZECTL, sc, sc + 1))
+                    transfer(tab, nt);
+            }
+          	// 拓容：rs左移16位这样最高位为1，当有竞争线程也进行拓容逻辑时会走上面的流程
+            else if (U.compareAndSwapInt(this, SIZECTL, sc,
+                                         (rs << RESIZE_STAMP_SHIFT) + 2))
+                transfer(tab, null);
+            s = sumCount();
+        }
+    }
+}
+```
+
+transfer
+
+数组迁移流程
+
+```java
+private final void transfer(Node<K,V>[] tab, Node<K,V>[] nextTab) {
+    int n = tab.length, stride;
+    if ((stride = (NCPU > 1) ? (n >>> 3) / NCPU : n) < MIN_TRANSFER_STRIDE)
+        stride = MIN_TRANSFER_STRIDE; // subdivide range
+    if (nextTab == null) {            // initiating
+        try {
+            @SuppressWarnings("unchecked")
+            Node<K,V>[] nt = (Node<K,V>[])new Node<?,?>[n << 1];
+            nextTab = nt;
+        } catch (Throwable ex) {      // try to cope with OOME
+            sizeCtl = Integer.MAX_VALUE;
+            return;
+        }
+        nextTable = nextTab;
+        transferIndex = n;
+    }
+    int nextn = nextTab.length;
+    ForwardingNode<K,V> fwd = new ForwardingNode<K,V>(nextTab);
+    boolean advance = true;
+    boolean finishing = false; // to ensure sweep before committing nextTab
+    for (int i = 0, bound = 0;;) {
+        Node<K,V> f; int fh;
+        while (advance) {
+            int nextIndex, nextBound;
+            if (--i >= bound || finishing)
+                advance = false;
+            else if ((nextIndex = transferIndex) <= 0) {
+                i = -1;
+                advance = false;
+            }
+            else if (U.compareAndSwapInt
+                     (this, TRANSFERINDEX, nextIndex,
+                      nextBound = (nextIndex > stride ?
+                                   nextIndex - stride : 0))) {
+                bound = nextBound;
+                i = nextIndex - 1;
+                advance = false;
+            }
+        }
+        if (i < 0 || i >= n || i + n >= nextn) {
+            int sc;
+            if (finishing) {
+                nextTable = null;
+                table = nextTab;
+                sizeCtl = (n << 1) - (n >>> 1);
+                return;
+            }
+            if (U.compareAndSwapInt(this, SIZECTL, sc = sizeCtl, sc - 1)) {
+                if ((sc - 2) != resizeStamp(n) << RESIZE_STAMP_SHIFT)
+                    return;
+                finishing = advance = true;
+                i = n; // recheck before commit
+            }
+        }
+        else if ((f = tabAt(tab, i)) == null)
+            advance = casTabAt(tab, i, null, fwd);
+        else if ((fh = f.hash) == MOVED)
+            advance = true; // already processed
+        else {
+            synchronized (f) {
+              	// 核心代码思想：将第i位的哈希槽一分为二重新hash到i和i+n的位置
+                if (tabAt(tab, i) == f) {
+                    Node<K,V> ln, hn;
+                    if (fh >= 0) {
+                      	// n为2的n次方，所以会有大概一般的元素为1，一半为0，便于后面重hash
+                        int runBit = fh & n;
+                        Node<K,V> lastRun = f;
+                        // 遍历链表找到当前hash冲突的最后一个为1的node
+                        for (Node<K,V> p = f.next; p != null; p = p.next) {
+                            int b = p.hash & n;
+                            if (b != runBit) {
+                                runBit = b;
+                                lastRun = p;
+                            }
+                        }
+                      	
+                        if (runBit == 0) {
+                            ln = lastRun;
+                            hn = null;
+                        }
+                        else {
+                            hn = lastRun;
+                            ln = null;
+                        }
+                      
+                      	// lastRun之前的一个元素必然与ln不同，所以这里会将ln和hn当中的设为非空
+                        for (Node<K,V> p = f; p != lastRun; p = p.next) {
+                            int ph = p.hash; K pk = p.key; V pv = p.val;
+                            if ((ph & n) == 0)
+                                ln = new Node<K,V>(ph, pk, pv, ln);
+                            else
+                                hn = new Node<K,V>(ph, pk, pv, hn);
+                        }
+                      
+                        setTabAt(nextTab, i, ln);
+                        setTabAt(nextTab, i + n, hn);
+                        setTabAt(tab, i, fwd);
+                        advance = true;
+                    }
+                    else if (f instanceof TreeBin) {
+                        TreeBin<K,V> t = (TreeBin<K,V>)f;
+                        TreeNode<K,V> lo = null, loTail = null;
+                        TreeNode<K,V> hi = null, hiTail = null;
+                        int lc = 0, hc = 0;
+                        for (Node<K,V> e = t.first; e != null; e = e.next) {
+                            int h = e.hash;
+                            TreeNode<K,V> p = new TreeNode<K,V>
+                                (h, e.key, e.val, null, null);
+                            if ((h & n) == 0) {
+                                if ((p.prev = loTail) == null)
+                                    lo = p;
+                                else
+                                    loTail.next = p;
+                                loTail = p;
+                                ++lc;
+                            }
+                            else {
+                                if ((p.prev = hiTail) == null)
+                                    hi = p;
+                                else
+                                    hiTail.next = p;
+                                hiTail = p;
+                                ++hc;
+                            }
+                        }
+                        ln = (lc <= UNTREEIFY_THRESHOLD) ? untreeify(lo) :
+                            (hc != 0) ? new TreeBin<K,V>(lo) : t;
+                        hn = (hc <= UNTREEIFY_THRESHOLD) ? untreeify(hi) :
+                            (lc != 0) ? new TreeBin<K,V>(hi) : t;
+                        setTabAt(nextTab, i, ln);
+                        setTabAt(nextTab, i + n, hn);
+                        setTabAt(tab, i, fwd);
+                        advance = true;
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+fullAddCount
+
+核心思路：CHM的计数方法，可以根据冲突情况生成多了CounterCell，put完kv后addCount时会生成
+
+一个hash值随机取数组中的一个元素进行cas操作
+
+```java
+private final void fullAddCount(long x, boolean wasUncontended) {
+    int h;
+    if ((h = ThreadLocalRandom.getProbe()) == 0) {
+        ThreadLocalRandom.localInit();      // force initialization
+        h = ThreadLocalRandom.getProbe();
+        wasUncontended = true;
+    }
+    boolean collide = false;                // True if last slot nonempty
+    for (;;) {
+        CounterCell[] as; CounterCell a; int n; long v;
+        if ((as = counterCells) != null && (n = as.length) > 0) {
+            if ((a = as[(n - 1) & h]) == null) {
+                if (cellsBusy == 0) {            // Try to attach new Cell
+                    CounterCell r = new CounterCell(x); // Optimistic create
+                    if (cellsBusy == 0 &&
+                        U.compareAndSwapInt(this, CELLSBUSY, 0, 1)) {
+                        boolean created = false;
+                        try {               // Recheck under lock
+                            CounterCell[] rs; int m, j;
+                            if ((rs = counterCells) != null &&
+                                (m = rs.length) > 0 &&
+                                rs[j = (m - 1) & h] == null) {
+                                rs[j] = r;
+                                created = true;
+                            }
+                        } finally {
+                            cellsBusy = 0;
+                        }
+                        if (created)
+                            break;
+                        continue;           // Slot is now non-empty
+                    }
+                }
+                collide = false;
+            }
+            else if (!wasUncontended)       // CAS already known to fail
+                wasUncontended = true;      // Continue after rehash
+            else if (U.compareAndSwapLong(a, CELLVALUE, v = a.value, v + x))
+                break;
+            else if (counterCells != as || n >= NCPU)
+                collide = false;            // At max size or stale
+            else if (!collide)
+                collide = true;
+            else if (cellsBusy == 0 &&
+                     U.compareAndSwapInt(this, CELLSBUSY, 0, 1)) {
+                try {
+                    if (counterCells == as) {// Expand table unless stale
+                        CounterCell[] rs = new CounterCell[n << 1];
+                        for (int i = 0; i < n; ++i)
+                            rs[i] = as[i];
+                        counterCells = rs;
+                    }
+                } finally {
+                    cellsBusy = 0;
+                }
+                collide = false;
+                continue;                   // Retry with expanded table
+            }
+            h = ThreadLocalRandom.advanceProbe(h);
+        }
+        else if (cellsBusy == 0 && counterCells == as &&
+                 U.compareAndSwapInt(this, CELLSBUSY, 0, 1)) {
+            boolean init = false;
+            try {                           // Initialize table
+                if (counterCells == as) {
+                    CounterCell[] rs = new CounterCell[2];
+                    rs[h & 1] = new CounterCell(x);
+                    counterCells = rs;
+                    init = true;
+                }
+            } finally {
+                cellsBusy = 0;
+            }
+            if (init)
+                break;
+        }
+        else if (U.compareAndSwapLong(this, BASECOUNT, v = baseCount, v + x))
+            break;                          // Fall back on using base
+    }
+}
+```
+
+
+
+resizeStamp
+
+| n    |       |
+| ---- | ----- |
+| 2    | 32798 |
+| 4    | 32796 |
+| 8    | 32794 |
+| 16   | 32792 |
+
+
+
+```java
+static final int resizeStamp(int n) {
+  	// 高位0的个数加上2^15
+    return Integer.numberOfLeadingZeros(n) | (1 << (RESIZE_STAMP_BITS - 1));
+}
+```
+
+
+
+##### get流程
+
+
+
+```java
+public V get(Object key) {
+    Node<K,V>[] tab; Node<K,V> e, p; int n, eh; K ek;
+    int h = spread(key.hashCode());
+    if ((tab = table) != null && (n = tab.length) > 0 &&
+        (e = tabAt(tab, (n - 1) & h)) != null) {
+        if ((eh = e.hash) == h) {
+            if ((ek = e.key) == key || (ek != null && key.equals(ek)))
+                return e.val;
+        }
+        else if (eh < 0)
+            return (p = e.find(h, key)) != null ? p.val : null;
+        while ((e = e.next) != null) {
+            if (e.hash == h &&
+                ((ek = e.key) == key || (ek != null && key.equals(ek))))
+                return e.val;
+        }
+    }
     return null;
 }
 ```
@@ -1376,9 +1768,19 @@ https://www.cnblogs.com/huxipeng/p/9289191.html
 
 ## volatile
 
-用来确保变量的更新操作及时通知到其他线程
+### 软件语义
 
+保证了可见性和有序性。
 
+所谓可见性就是直接访问主内存，不走cpu寄存器，当然单核cpu不存在这种问题。
+
+所谓有序性指的是防止指令重排序，意思是对此变量的操作之前和之后的cpu指令不能乱序否则会出现访问出错的情况。
+
+### 硬件底层实现原理？
+
+当使用**volatile**修饰变量时，应用就不会从寄存器中获取该变量的值，而是从内存（高速缓存）中获取。高速缓存是线程共享的，而寄存器是各个cpu上的，对于多核系统是如此的。
+
+<img src="images/731716-20160708224602686-2141387366.png" alt="img" style="zoom:50%;" />
 
 ## Synchronized
 
@@ -1396,7 +1798,15 @@ https://www.cnblogs.com/huxipeng/p/9289191.html
 | ------ | --------------------------------------- | ------------------------------------------------------------ |
 | 对象锁 | 含synchronized方法/代码库的类的实例对象 |                                                              |
 | 方法锁 | 使用synchronized修饰的方法              |                                                              |
-| 类锁   | 类锁实际锁的是class对象                 | 一个静态方法被synchronized修饰。此类所有的实例化对象在调用此方法时，共用同一把锁 |
+| 类锁   | 类锁实际锁的是class对象                 | 一个静态方法被synchronized修饰。<br>此类所有的实例化对象在调用此方法时，共用同一把锁 |
+
+| 锁       | 优点                           | 缺点                                                       | 适用场景                                     |
+| -------- | ------------------------------ | ---------------------------------------------------------- | -------------------------------------------- |
+| 偏向锁   |                                | 线程间存在竞争会带来额外的锁撤销的消耗                     | 适用一个线程场景适用                         |
+| 轻量级锁 | 不用阻塞，提高了线程的访问速度 | 由于是不公平锁并且是自旋操作，所以可能有线程处于饥饿状态； | 追求相应时间。同步执行速度比较快             |
+| 重量级锁 | 不用自旋不消耗cpu              | 会切换到内核态，导致相应速度降低                           | 追求吞吐量；同步执行速度较长，比如一些io场景 |
+
+
 
 ### 锁的升级
 
@@ -2129,6 +2539,68 @@ cas是一种乐观锁，jdk内部有很多使用此机制实现同步的类和�
 todo
 
 futureTask是一种异步等待线程执行结果的机制。
+
+
+
+## 锁的使用场景
+
+
+
+### lock和synchronized的选择？
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+| 锁的类别     | 锁机制 | 锁的范围     | 场景                           | 用法 |
+| ------------ | ------ | ------------ | ------------------------------ | ---- |
+| lock         | 乐观锁 | 灵活，范围大 | 条件队列<br>公平锁<br>中断机制 |      |
+| synchronized | 悲观锁 | 方法、代码块 | 非公平锁                       |      |
+| cas          | 乐观锁 |              |                                |      |
+
+
 
 
 
