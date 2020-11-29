@@ -719,6 +719,12 @@ Node<K,V> newNode(int hash, K key, V value, Node<K,V> e) {
 }
 ```
 
+#### LRU算法
+
+todo
+
+### **ConcurrentSkipListMap**
+
 
 
 ### ConcurrentHashMap
@@ -1684,7 +1690,46 @@ Java引用可分为强引用，软引用，弱引用和虚引用。
 
 
 
+# 网络
 
+## 字符
+
+### CharBuffer
+
+### ByteBuffer
+
+
+
+#### DirectByteBuffer
+
+#### HeapByteBuffer
+
+
+
+### InputStream
+
+| 实现类               | 用途 |      |
+| -------------------- | ---- | ---- |
+| FilterInputStream    |      |      |
+| BufferedInputStream  |      |      |
+| ByteArrayInputStream |      |      |
+| DataInputStream      |      |      |
+| FilterInputStream    |      |      |
+
+
+
+#### FilterInputStream
+
+### OutputStream
+
+
+
+| 实现类                | 用途 |      |
+| --------------------- | ---- | ---- |
+| BufferedOutputStream  |      |      |
+| ByteArrayOutputStream |      |      |
+| DataOutputStream      |      |      |
+| FilterOutputStream    |      |      |
 
 # Java同步机制
 
@@ -2627,6 +2672,53 @@ futureTask是一种异步等待线程执行结果的机制。
 | lock         | 乐观锁 | 灵活，范围大 | 条件队列<br>公平锁<br>中断机制 |      |
 | synchronized | 悲观锁 | 方法、代码块 | 非公平锁                       |      |
 | cas          | 乐观锁 |              |                                |      |
+
+
+
+# JDK1.8新特性
+
+## 函数式接口
+
+
+
+函数式接口(Functional Interface)就是一个有且仅有一个抽象方法，但是可以有多个非抽象方法的接口。
+
+### 使用场景
+
+函数接口适用于方法或者动作仅执行一次或者适用于特定的场景，比如map的foreach方法，这里可以让使用者自己定义方法体，降低了代码耦合度，也不用专门去定义一个接口并实现其中的方法，达到了简化代码的目的。
+
+示例如下：这里用到了两个函数式接口Supplier和Consumer
+
+```java
+public class TestA {
+
+	private void methodA(Supplier<Integer> sum, Consumer<Object> after) {
+
+		Integer total = sum.get();
+
+		after.accept(total);
+	}
+
+	@Test
+	public void testA() {
+		Map<String, Integer> map = new HashMap<>();
+		map.put("a", 100);
+		map.put("b", 200);
+		map.put("c", 300);
+		methodA(() -> { 
+						int sum = map.values().stream().mapToInt(i -> i).sum();
+						return sum; }, 
+				(s) -> { System.out.println("sum:" + s); });
+
+	}
+}
+```
+
+
+
+### 常用的函数式接口
+
+
 
 
 

@@ -50,6 +50,14 @@ kafka是一个流处理（实时和离线）平台。所以从kafka的使命来�
 
 副本之间是如何做到一致性的？考虑了CAP中的CP?
 
+
+
+## 事务
+
+<img src="images/kafka_txn.png" alt="image-20201118101425188" style="zoom: 33%;" />
+
+https://cwiki.apache.org/confluence/display/KAFKA/KIP-98+-+Exactly+Once+Delivery+and+Transactional+Messaging#KIP98ExactlyOnceDeliveryandTransactionalMessaging-DataFlow
+
 # FAQ
 
 ### GroupCoordinator机制
@@ -102,13 +110,5 @@ kafka如何保证事务的一致性？
 
 
 ## 核心功能
-
-
-
-
-
-
-
->>>>>>> 8fe6c7112a5dbc1dfd7e5b706640713a7985c9c5
 
 
