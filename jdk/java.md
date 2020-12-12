@@ -455,9 +455,94 @@ public interface BlockingQueue<E> extends Queue<E> {
 
 #### ArrayBlockingQueue 
 
+
+
 #### LinkedBlockingQueue 
 
+
+
+结构体，LinkedBlockingQueue最大值为整数的最大值，其底层数据结构为链表实现，当然这并不是说其容量是没有限制的，
+
+可以指定capacity，当数组中元素到达此阈值时需要等待条件锁notFull的通知。
+
+知识点：
+
+LinkedBlockingQueue使用了两个条件锁和两个可重入锁，take和put操作持有不同的重入锁，这样做的目的是支持不同线程同时进行读写操作。
+
+```java
+public LinkedBlockingQueue() {
+    this(Integer.MAX_VALUE);
+}
+
+public LinkedBlockingQueue(int capacity) {
+  if (capacity <= 0) throw new IllegalArgumentException();
+  this.capacity = capacity;
+  last = head = new Node<E>(null);
+}
+```
+
+
+
+put流程
+
+```java
+public void put(E e) throws InterruptedException {
+    if (e == null) throw new NullPointerException();
+    // Note: convention in all put/take/etc is to preset local var
+    // holding count negative to indicate failure unless set.
+    int c = -1;
+    Node<E> node = new Node<E>(e);
+    final ReentrantLock putLock = this.putLock;
+    final AtomicInteger count = this.count;
+    putLock.lockInterruptibly();
+    try {
+        /*
+         * Note that count is used in wait guard even though it is
+         * not protected by lock. This works because count can
+         * only decrease at this point (all other puts are shut
+         * out by lock), and we (or some other waiting put) are
+         * signalled if it ever changes from capacity. Similarly
+         * for all other uses of count in other wait guards.
+         */
+        while (count.get() == capacity) {
+            notFull.await();
+        }
+        enqueue(node);
+        c = count.getAndIncrement();
+        if (c + 1 < capacity)
+            notFull.signal();
+    } finally {
+        putLock.unlock();
+    }
+    if (c == 0)
+        signalNotEmpty();
+}
+
+// linkedblockingqueue为尾部插入
+private void enqueue(Node<E> node) {
+  // assert putLock.isHeldByCurrentThread();
+  // assert last.next == null;
+  last = last.next = node;
+}
+```
+
+
+
+#### LinkedBlockingDeque
+
+[ dek ]
+
+此队列初始化和linkedBlockingQueue差不多，但是支持队列元素的双端操作，实现了BlockingDeque接口。
+
+包括addFirst、offerFirst、removeFirst等操作。
+
+
+
 #### DelayQueue
+
+
+
+
 
 #### LinkedTransferQueue
 
@@ -465,9 +550,133 @@ public interface BlockingQueue<E> extends Queue<E> {
 
 #### LinkedTransferQueue
 
-#### LinkedBlockingDeque
 
 
+#### PriorityBlockingQueue
+
+优先级队列必须实现Comparable接口或者指定Comparable接口，否则会抛出cast错误。
+
+初始化，带优先级的阻塞队列可以指定comparator实现来实现优先级排序。带有阻塞的队列都会有条件锁，来实现非空和非满条件的同步。
+
+```java
+public PriorityBlockingQueue(int initialCapacity,
+                             Comparator<? super E> comparator) {
+    if (initialCapacity < 1)
+        throw new IllegalArgumentException();
+    this.lock = new ReentrantLock();
+    this.notEmpty = lock.newCondition();
+    this.comparator = comparator;
+    this.queue = new Object[initialCapacity];
+}
+```
+
+offer实现
+
+offer	
+
+```java
+public boolean offer(E e) {
+    if (e == null)
+        throw new NullPointerException();
+    final ReentrantLock lock = this.lock;
+  	// 先获取可重入锁，避免在tryGrow时发生数据不一致的情况
+    lock.lock();
+    int n, cap;
+    Object[] array;
+    while ((n = size) >= (cap = (array = queue).length))
+        tryGrow(array, cap);
+    try {
+        Comparator<? super E> cmp = comparator;
+      	// 如果没有自定义比较器，则使用元素E的默认comparable实现；
+        if (cmp == null)
+            siftUpComparable(n, e, array);
+        else
+            siftUpUsingComparator(n, e, array, cmp);
+        size = n + 1;
+        notEmpty.signal();
+    } finally {
+        lock.unlock();
+    }
+    return true;
+}
+```
+
+小于0的情况下会将插入的元素交换到堆的顶部。
+
+在取出或者插入元素时注意优先级的队列不管排序，只管上浮或者下降不管排序
+
+```java
+private static <T> void siftUpUsingComparator(int k, T x, Object[] array,
+                                   Comparator<? super T> cmp) {
+    while (k > 0) {
+        int parent = (k - 1) >>> 1;
+        Object e = array[parent];
+        if (cmp.compare(x, (T) e) >= 0)
+            break;
+        array[k] = e;
+        k = parent;
+    }
+    array[k] = x;
+}
+```
+
+
+
+实例：
+
+```java
+public class Msg implements Comparable {
+	int priority;
+	String data;
+
+	public int getPriority() {
+		return priority;
+	}
+
+	public void setPriority(int priority) {
+		this.priority = priority;
+	}
+
+	public String getData() {
+		return data;
+	}
+
+	public void setData(String data) {
+		this.data = data;
+	}
+
+
+	@Override
+	public int compareTo(Object o) {
+		if (o instanceof Msg) {
+			return this.priority - ((Msg) o).priority;
+		}
+
+		return -1;
+	}
+}
+
+
+public class Producer {
+
+   PriorityBlockingQueue<Msg> priorityQueue = new PriorityBlockingQueue<>(128);
+
+
+   public void sendMsg() {
+      for (int i =10; i > 0; i--) {
+         Msg msg = new Msg();
+         msg.setPriority(i);
+         msg.setData(String.valueOf(System.currentTimeMillis()));
+         priorityQueue.put(msg);
+      }
+
+
+      priorityQueue.toArray();
+   }
+
+
+}
+```
 
 ### 非阻塞队列
 
@@ -476,6 +685,20 @@ public interface BlockingQueue<E> extends Queue<E> {
 #### ConcurrentLinkedDeque
 
 #### PriorityQueue
+
+优先级队列，通过Comparator
+
+```java
+public PriorityQueue(int initialCapacity,
+                     Comparator<? super E> comparator) {
+    // Note: This restriction of at least one is not actually needed,
+    // but continues for 1.5 compatibility
+    if (initialCapacity < 1)
+        throw new IllegalArgumentException();
+    this.queue = new Object[initialCapacity];
+    this.comparator = comparator;
+}
+```
 
 
 
@@ -721,7 +944,7 @@ Node<K,V> newNode(int hash, K key, V value, Node<K,V> e) {
 
 #### LRU算法
 
-todo
+Todo
 
 ### **ConcurrentSkipListMap**
 
@@ -1193,6 +1416,16 @@ public V get(Object key) {
 }
 ```
 
+## Set
+
+java.util.concurrent.ConcurrentHashMap.KeySetView
+
+### CopyOnWriteArraySet
+
+### ConcurrentSkipListSet
+
+
+
 # 多线程
 
 ## 线程
@@ -1314,8 +1547,6 @@ public enum State {
 
 ### 综述
 
-
-
 ```java
 protected ThreadPoolExecutor createExecutor(
       int corePoolSize, int maxPoolSize, int keepAliveSeconds, BlockingQueue<Runnable> queue,
@@ -1326,7 +1557,16 @@ protected ThreadPoolExecutor createExecutor(
 }
 ```
 
+线程参数：
 
+| 参数                     | 作用       | 说明                          |
+| ------------------------ | ---------- | ----------------------------- |
+| corePoolSize             | 核心线程数 |                               |
+| maxPoolSize              | 最大线程数 | 触发使用最大线程条件：<br/>1. |
+| keepAliveSeconds         |            |                               |
+| queue                    |            |                               |
+| threadFactory            |            |                               |
+| rejectedExecutionHandler |            |                               |
 
 接口线程工厂：可以自定义线程创建过程，比如设置线程优先级、线程组、是否守护线程等属性
 
@@ -1461,8 +1701,6 @@ public interface Executor {
 
 #### 设计思想
 
-
-
 ### 源代码
 
 #### 数据结构
@@ -1495,6 +1733,87 @@ private final class Worker
 }
 ```
 
+#### Worker
+
+
+
+Worker是工作线程的主体实现，是runnable或者callable的执行者。
+
+
+
+```java
+private final class Worker
+    extends AbstractQueuedSynchronizer
+    implements Runnable
+{
+    /**
+     * This class will never be serialized, but we provide a
+     * serialVersionUID to suppress a javac warning.
+     */
+    private static final long serialVersionUID = 6138294804551838833L;
+
+    /** Thread this worker is running in.  Null if factory fails. */
+    final Thread thread;
+    /** Initial task to run.  Possibly null. */
+    Runnable firstTask;
+    /** Per-thread task counter */
+    volatile long completedTasks;
+
+    /**
+     * Creates with given first task and thread from ThreadFactory.
+     * @param firstTask the first task (null if none)
+     */
+    Worker(Runnable firstTask) {
+        setState(-1); // inhibit interrupts until runWorker
+        this.firstTask = firstTask;
+        this.thread = getThreadFactory().newThread(this);
+    }
+
+    /** Delegates main run loop to outer runWorker  */
+    public void run() {
+        runWorker(this);
+    }
+
+    // Lock methods
+    //
+    // The value 0 represents the unlocked state.
+    // The value 1 represents the locked state.
+
+    protected boolean isHeldExclusively() {
+        return getState() != 0;
+    }
+
+    protected boolean tryAcquire(int unused) {
+        if (compareAndSetState(0, 1)) {
+            setExclusiveOwnerThread(Thread.currentThread());
+            return true;
+        }
+        return false;
+    }
+
+    protected boolean tryRelease(int unused) {
+        setExclusiveOwnerThread(null);
+        setState(0);
+        return true;
+    }
+
+    public void lock()        { acquire(1); }
+    public boolean tryLock()  { return tryAcquire(1); }
+    public void unlock()      { release(1); }
+    public boolean isLocked() { return isHeldExclusively(); }
+
+    void interruptIfStarted() {
+        Thread t;
+        if (getState() >= 0 && (t = thread) != null && !t.isInterrupted()) {
+            try {
+                t.interrupt();
+            } catch (SecurityException ignore) {
+            }
+        }
+    }
+}
+```
+
 
 
 #### execute
@@ -1505,13 +1824,17 @@ private final class Worker
 public void execute(Runnable command) {
     if (command == null)
         throw new NullPointerException();
-    // 如果工作线程数小于核心线程数则添加工作线程
+    // 1.如果工作线程数小于核心线程数则添加工作线程
     int c = ctl.get();
     if (workerCountOf(c) < corePoolSize) {
         if (addWorker(command, true))
             return;
         c = ctl.get();
     }
+  	// 2.线程处于运行状态并且工作队列添加成功,执行:
+  	// 2.a再次检查状态，如果不处于运行状态则拒绝提交任务
+  	// 2.b 工作线程为0，则添加到最大线程。（适用于缓存线程池的场景）
+  	// 否则执行步骤3
     if (isRunning(c) && workQueue.offer(command)) {
         int recheck = ctl.get();
         if (! isRunning(recheck) && remove(command))
@@ -1519,6 +1842,7 @@ public void execute(Runnable command) {
         else if (workerCountOf(recheck) == 0)
             addWorker(null, false);
     }
+  	// 3.工作队列添加失败后才添加才继续申请线程，失败后拒绝
     else if (!addWorker(command, false))
         reject(command);
 }
@@ -1541,7 +1865,9 @@ private boolean addWorker(Runnable firstTask, boolean core) {
         int c = ctl.get();
         int rs = runStateOf(c);
 
-        // Check if queue empty only if necessary.
+        // 1.当线程池状态大于SHUTDOWN时表示其不再处理任务因此也就没必要继续添加worker;
+      	// 2. 当线程池状态等于SHUTDOWN时并且firstTask==null表示不再接受新任务并且工作队列中
+      	// 还有要处理的任务时可能需要添加任务线程
         if (rs >= SHUTDOWN &&
             ! (rs == SHUTDOWN &&
                firstTask == null &&
@@ -1549,12 +1875,15 @@ private boolean addWorker(Runnable firstTask, boolean core) {
             return false;
 
         for (;;) {
+          	// 获取工作线程个数，如果大于最大或者大于最大线程数（视core值决定）则
+          	// 返回false不再进行工作线程的添加
             int wc = workerCountOf(c);
             if (wc >= CAPACITY ||
                 wc >= (core ? corePoolSize : maximumPoolSize))
                 return false;
             if (compareAndIncrementWorkerCount(c))
                 break retry;
+          	// 如果线程池状态发生变化则重读
             c = ctl.get();  // Re-read ctl
             if (runStateOf(c) != rs)
                 continue retry;
@@ -1581,7 +1910,9 @@ private boolean addWorker(Runnable firstTask, boolean core) {
                     (rs == SHUTDOWN && firstTask == null)) {
                     if (t.isAlive()) // precheck that t is startable
                         throw new IllegalThreadStateException();
+                  	// 将工作线程添加到hashset中
                     workers.add(w);
+                  	// 记录已经添加的最大线程数
                     int s = workers.size();
                     if (s > largestPoolSize)
                         largestPoolSize = s;
@@ -1590,6 +1921,8 @@ private boolean addWorker(Runnable firstTask, boolean core) {
             } finally {
                 mainLock.unlock();
             }
+          
+          	// 如果工作线程添加后不管有没有firstTask都要启动
             if (workerAdded) {
               	// 运行工作线程 见runWorker流程
                 t.start();
@@ -1653,6 +1986,8 @@ final void runWorker(Worker w) {
     }
 }
 ```
+
+
 
 # 引用
 
@@ -2051,7 +2386,7 @@ protected final boolean tryAcquire(int acquires) {
 
 
 
-<img src="C:/Users/ykongfu/Desktop/images/AQS.png" alt="AQS" style="zoom:67%;" />
+<img src="images/AQS.png" alt="AQS" style="zoom:67%;" />
 
 
 

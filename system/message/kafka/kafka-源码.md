@@ -1,16 +1,603 @@
 
 
+## 生产者
+
+### 生产者启动流程
 
 
-## 生产者启动流程
 
 
 
-
-
-## 生产者IO流程图
+### 生产者发包流程图
 
 <img src="images/io_flow.png" alt="image-20201125155533078" style="zoom:50%;" />
+
+
+
+#### ProducerRecord
+
+生产者发送消息的类，kafka发送的消息是以ProducerRecord的格式发送的。
+
+```java
+public class ProducerRecord<K, V> {
+
+    private final String topic;
+    private final Integer partition;
+    private final Headers headers;
+    private final K key;
+    private final V value;
+    private final Long timestamp;
+    /**
+     * Creates a record to be sent to a specified topic and partition
+     *
+     * @param topic The topic the record will be appended to
+     * @param partition The partition to which the record should be sent
+     * @param key The key that will be included in the record
+     * @param value The record contents
+     */
+    public ProducerRecord(String topic, Integer partition, K key, V value) {
+        this(topic, partition, null, key, value, null);
+    }
+	...  
+}
+```
+
+
+
+#### KafkaProducer
+
+发送消息入口，interceptors消息发送的的拦截器，可以在消息发送时进行拦截，对报文进行解析或者进行自定义动作。
+
+```java
+@Override
+public Future<RecordMetadata> send(ProducerRecord<K, V> record, Callback callback) {
+    // intercept the record, which can be potentially modified; this method does not throw exceptions
+    ProducerRecord<K, V> interceptedRecord = this.interceptors.onSend(record);
+    return doSend(interceptedRecord, callback);
+}
+```
+
+
+
+doSend
+
+```java
+private Future<RecordMetadata> doSend(ProducerRecord<K, V> record, Callback callback) {
+    TopicPartition tp = null;
+    try {
+      	// 检查sender状态
+        throwIfProducerClosed();
+        // first make sure the metadata for the topic is available
+        long nowMs = time.milliseconds();
+        ClusterAndWaitTime clusterAndWaitTime;
+        try {
+          	// 这里需要等待topic/partition的元数据更新，比如partition的个数等
+            clusterAndWaitTime = waitOnMetadata(record.topic(), record.partition(), nowMs, maxBlockTimeMs);
+        } catch (KafkaException e) {
+            if (metadata.isClosed())
+                throw new KafkaException("Producer closed while send in progress", e);
+            throw e;
+        }
+        nowMs += clusterAndWaitTime.waitedOnMetadataMs;
+        long remainingWaitMs = Math.max(0, maxBlockTimeMs - clusterAndWaitTime.waitedOnMetadataMs);
+        Cluster cluster = clusterAndWaitTime.cluster;
+      	// 序列化键为字节数组
+        byte[] serializedKey;
+        try {
+            serializedKey = keySerializer.serialize(record.topic(), record.headers(), record.key());
+        } catch (ClassCastException cce) {
+            throw new SerializationException("Can't convert key of class " + record.key().getClass().getName() +
+                    " to class " + producerConfig.getClass(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG).getName() +
+                    " specified in key.serializer", cce);
+        }
+      	// 序列化值为字节数组
+        byte[] serializedValue;
+        try {
+            serializedValue = valueSerializer.serialize(record.topic(), record.headers(), record.value());
+        } catch (ClassCastException cce) {
+            throw new SerializationException("Can't convert value of class " + record.value().getClass().getName() +
+                    " to class " + producerConfig.getClass(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG).getName() +
+                    " specified in value.serializer", cce);
+        }
+      	// 为消息分配Partition，这里的分配策略可以通过参数指定，比如按key的hash取topic的hash数，round--robin等策略
+        int partition = partition(record, serializedKey, serializedValue, cluster);
+        tp = new TopicPartition(record.topic(), partition);
+
+        setReadOnly(record.headers());
+        Header[] headers = record.headers().toArray();
+
+      	// 计算要发送的消息的长度大小，包括producer的头部大小、消息头部的大小及报文负载本省需要的字节大小等
+        int serializedSize = AbstractRecords.estimateSizeInBytesUpperBound(apiVersions.maxUsableProduceMagic(),
+                compressionType, serializedKey, serializedValue, headers);
+      	// 确保消息大小合理，不能超出设定大小及设定的内存buffer大小
+        ensureValidRecordSize(serializedSize);
+        long timestamp = record.timestamp() == null ? nowMs : record.timestamp();
+        if (log.isTraceEnabled()) {
+            log.trace("Attempting to append record {} with callback {} to topic {} partition {}", record, callback, record.topic(), partition);
+        }
+        // producer callback will make sure to call both 'callback' and interceptor callback
+        Callback interceptCallback = new InterceptorCallback<>(callback, this.interceptors, tp);
+
+        if (transactionManager != null && transactionManager.isTransactional()) {
+            transactionManager.failIfNotReadyForSend();
+        }
+      	// 往消息池中添加需要发送的消息，注意：这里会按partition来进行消息发送（批发送和消息压缩等）
+        RecordAccumulator.RecordAppendResult result = accumulator.append(tp, timestamp, serializedKey,
+                serializedValue, headers, interceptCallback, remainingWaitMs, true, nowMs);
+
+        if (result.abortForNewBatch) {
+            int prevPartition = partition;
+            partitioner.onNewBatch(record.topic(), cluster, prevPartition);
+            partition = partition(record, serializedKey, serializedValue, cluster);
+            tp = new TopicPartition(record.topic(), partition);
+            if (log.isTraceEnabled()) {
+                log.trace("Retrying append due to new batch creation for topic {} partition {}. The old partition was {}", record.topic(), partition, prevPartition);
+            }
+            // producer callback will make sure to call both 'callback' and interceptor callback
+            interceptCallback = new InterceptorCallback<>(callback, this.interceptors, tp);
+
+            result = accumulator.append(tp, timestamp, serializedKey,
+                serializedValue, headers, interceptCallback, remainingWaitMs, false, nowMs);
+        }
+
+        if (transactionManager != null && transactionManager.isTransactional())
+            transactionManager.maybeAddPartitionToTransaction(tp);
+
+        if (result.batchIsFull || result.newBatchCreated) {
+            log.trace("Waking up the sender since topic {} partition {} is either full or getting a new batch", record.topic(), partition);
+            this.sender.wakeup();
+        }
+      	// 返回消息发送的同步future
+        return result.future;
+        // handling exceptions and record the errors;
+        // for API exceptions return them in the future,
+        // for other exceptions throw directly
+    } catch (ApiException e) {
+        log.debug("Exception occurred during message send:", e);
+        if (callback != null)
+            callback.onCompletion(null, e);
+        this.errors.record();
+        this.interceptors.onSendError(record, tp, e);
+        return new FutureFailure(e);
+    } catch (InterruptedException e) {
+        this.errors.record();
+        this.interceptors.onSendError(record, tp, e);
+        throw new InterruptException(e);
+    } catch (BufferExhaustedException e) {
+        this.errors.record();
+        this.metrics.sensor("buffer-exhausted-records").record();
+        this.interceptors.onSendError(record, tp, e);
+        throw e;
+    } catch (KafkaException e) {
+        this.errors.record();
+        this.interceptors.onSendError(record, tp, e);
+        throw e;
+    } catch (Exception e) {
+        // we notify interceptor about all exceptions, since onSend is called before anything else in this method
+        this.interceptors.onSendError(record, tp, e);
+        throw e;
+    }
+}
+```
+
+
+
+#### RecordAccumulator
+
+
+
+此类是生产者的消息池，相当于一个缓冲队列的角色。
+
+
+
+```java
+public RecordAccumulator(LogContext logContext,
+                         int batchSize,
+                         CompressionType compression,
+                         int lingerMs,
+                         long retryBackoffMs,
+                         int deliveryTimeoutMs,
+                         Metrics metrics,
+                         String metricGrpName,
+                         Time time,
+                         ApiVersions apiVersions,
+                         TransactionManager transactionManager,
+                         BufferPool bufferPool) {
+    this.log = logContext.logger(RecordAccumulator.class);
+    this.drainIndex = 0;
+    this.closed = false;
+    this.flushesInProgress = new AtomicInteger(0);
+    this.appendsInProgress = new AtomicInteger(0);
+  	// 批量发送大小
+    this.batchSize = batchSize;
+  	// 消息压缩
+    this.compression = compression;
+    this.lingerMs = lingerMs;
+    this.retryBackoffMs = retryBackoffMs;
+    this.deliveryTimeoutMs = deliveryTimeoutMs;
+  	// 存储的是分区到分区双端队列的映射关系
+  	// TopicPartition -> ArrayDeque<ProducerBatch>
+    this.batches = new CopyOnWriteMap<>();
+  	// 发送消息的内存池，可对消息内存进行分配、回收、大小控制
+    this.free = bufferPool;
+    this.incomplete = new IncompleteBatches();
+    this.muted = new HashMap<>();
+    this.time = time;
+    this.apiVersions = apiVersions;
+  	// 事务管理器
+    this.transactionManager = transactionManager;
+    registerMetrics(metrics, metricGrpName);
+}
+```
+
+org.apache.kafka.clients.producer.internals.RecordAccumulator#append
+
+```java
+public RecordAppendResult append(TopicPartition tp,
+                                 long timestamp,
+                                 byte[] key,
+                                 byte[] value,
+                                 Header[] headers,
+                                 Callback callback,
+                                 long maxTimeToBlock,
+                                 boolean abortOnNewBatch,
+                                 long nowMs) throws InterruptedException {
+    // We keep track of the number of appending thread to make sure we do not miss batches in
+    // abortIncompleteBatches().
+    appendsInProgress.incrementAndGet();
+    ByteBuffer buffer = null;
+    if (headers == null) headers = Record.EMPTY_HEADERS;
+    try {
+        // 获取分区的双端队列，没有则初始化
+        Deque<ProducerBatch> dq = getOrCreateDeque(tp);
+        synchronized (dq) {
+            if (closed)
+                throw new KafkaException("Producer closed while send in progress");
+          	// 尝试往最后一个元素里追加消息如果列表为空则返回Null
+            RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callback, dq, nowMs);
+            if (appendResult != null)
+                return appendResult;
+        }
+
+        // we don't have an in-progress record batch try to allocate a new batch
+        if (abortOnNewBatch) {
+            // Return a result that will cause another call to append.
+            return new RecordAppendResult(null, false, false, true);
+        }
+
+      	// 以下步骤为创建分区对应的ProducerBatch的过程，然后添加到双端队列尾部
+        byte maxUsableMagic = apiVersions.maxUsableProduceMagic();
+      	// 计算发送分区消息的批大小（也就是说当消息累计到此数量时发送消息，这个数量会影响发送算的吞吐量）
+      	// 这里取消息大小和设定值中的最大值，因为可能消息会很大
+        int size = Math.max(this.batchSize, AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, compression, key, value, headers));
+        log.trace("Allocating a new {} byte message buffer for topic {} partition {}", size, tp.topic(), tp.partition());
+      	// 内存池分配大小
+        buffer = free.allocate(size, maxTimeToBlock);
+
+        // Update the current time in case the buffer allocation blocked above.
+        nowMs = time.milliseconds();
+        synchronized (dq) {
+            // Need to check if producer is closed again after grabbing the dequeue lock.
+            if (closed)
+                throw new KafkaException("Producer closed while send in progress");
+						// 这里首先再次尝试，因为有可能存在竞态条件
+            RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callback, dq, nowMs);
+            if (appendResult != null) {
+                // Somebody else found us a batch, return the one we waited for! Hopefully this doesn't happen often...
+                return appendResult;
+            }
+						// 创建消息构建起
+            MemoryRecordsBuilder recordsBuilder = recordsBuilder(buffer, maxUsableMagic);
+            ProducerBatch batch = new ProducerBatch(tp, recordsBuilder, nowMs);
+            FutureRecordMetadata future = Objects.requireNonNull(batch.tryAppend(timestamp, key, value, headers,
+                    callback, nowMs));
+
+            dq.addLast(batch);
+            incomplete.add(batch);
+
+            // Don't deallocate this buffer in the finally block as it's being used in the record batch
+            buffer = null;
+            return new RecordAppendResult(future, dq.size() > 1 || batch.isFull(), true, false);
+        }
+    } finally {
+        if (buffer != null)
+            free.deallocate(buffer);
+        appendsInProgress.decrementAndGet();
+    }
+}
+```
+
+tryAppend
+
+```java
+public FutureRecordMetadata tryAppend(long timestamp, byte[] key, byte[] value, Header[] headers, Callback callback, long now) {
+    if (!recordsBuilder.hasRoomFor(timestamp, key, value, headers)) {
+        return null;
+    } else {
+        Long checksum = this.recordsBuilder.append(timestamp, key, value, headers);
+        this.maxRecordSize = Math.max(this.maxRecordSize, AbstractRecords.estimateSizeInBytesUpperBound(magic(),
+                recordsBuilder.compressionType(), key, value, headers));
+        this.lastAppendTime = now;
+        FutureRecordMetadata future = new FutureRecordMetadata(this.produceFuture, this.recordCount,
+                                                               timestamp, checksum,
+                                                               key == null ? -1 : key.length,
+                                                               value == null ? -1 : value.length,
+                                                               Time.SYSTEM);
+        // we have to keep every future returned to the users in case the batch needs to be
+        // split to several new batches and resent.
+        thunks.add(new Thunk(callback, future));
+        this.recordCount++;
+        return future;
+    }
+}
+```
+
+那么这些数据加到accumulator中的数据什么发送的呢，看下面的分解：
+
+
+
+生成KafkaProducer的时候会生成相应的Sender，以下是sender的主流程，
+
+sender会定时获取accumulator中的消息并组成成相应的request请求。
+
+```java
+public void run() {
+    log.debug("Starting Kafka producer I/O thread.");
+
+    // main loop, runs until close is called
+    while (running) {
+        try {
+            runOnce();
+        } catch (Exception e) {
+            log.error("Uncaught error in kafka producer I/O thread: ", e);
+        }
+    }
+
+    log.debug("Beginning shutdown of Kafka producer I/O thread, sending remaining records.");
+
+    // okay we stopped accepting requests but there may still be
+    // requests in the transaction manager, accumulator or waiting for acknowledgment,
+    // wait until these are completed.
+    while (!forceClose && ((this.accumulator.hasUndrained() || this.client.inFlightRequestCount() > 0) || hasPendingTransactionalRequests())) {
+        try {
+            runOnce();
+        } catch (Exception e) {
+            log.error("Uncaught error in kafka producer I/O thread: ", e);
+        }
+    }
+
+    // Abort the transaction if any commit or abort didn't go through the transaction manager's queue
+    while (!forceClose && transactionManager != null && transactionManager.hasOngoingTransaction()) {
+        if (!transactionManager.isCompleting()) {
+            log.info("Aborting incomplete transaction due to shutdown");
+            transactionManager.beginAbort();
+        }
+        try {
+            runOnce();
+        } catch (Exception e) {
+            log.error("Uncaught error in kafka producer I/O thread: ", e);
+        }
+    }
+
+    if (forceClose) {
+        // We need to fail all the incomplete transactional requests and batches and wake up the threads waiting on
+        // the futures.
+        if (transactionManager != null) {
+            log.debug("Aborting incomplete transactional requests due to forced shutdown");
+            transactionManager.close();
+        }
+        log.debug("Aborting incomplete batches due to forced shutdown");
+        this.accumulator.abortIncompleteBatches();
+    }
+    try {
+        this.client.close();
+    } catch (Exception e) {
+        log.error("Failed to close network client", e);
+    }
+
+    log.debug("Shutdown of Kafka producer I/O thread has completed.");
+}
+```
+
+runOnce
+
+```java
+void runOnce() {
+    if (transactionManager != null) {
+        try {
+            transactionManager.maybeResolveSequences();
+
+            // do not continue sending if the transaction manager is in a failed state
+            if (transactionManager.hasFatalError()) {
+                RuntimeException lastError = transactionManager.lastError();
+                if (lastError != null)
+                    maybeAbortBatches(lastError);
+                client.poll(retryBackoffMs, time.milliseconds());
+                return;
+            }
+
+            // Check whether we need a new producerId. If so, we will enqueue an InitProducerId
+            // request which will be sent below
+            transactionManager.bumpIdempotentEpochAndResetIdIfNeeded();
+
+            if (maybeSendAndPollTransactionalRequest()) {
+                return;
+            }
+        } catch (AuthenticationException e) {
+            // This is already logged as error, but propagated here to perform any clean ups.
+            log.trace("Authentication exception while processing transactional request", e);
+            transactionManager.authenticationFailed(e);
+        }
+    }
+
+    long currentTimeMs = time.milliseconds();
+  	// 发送数据主流程
+    long pollTimeout = sendProducerData(currentTimeMs);
+    client.poll(pollTimeout, currentTimeMs);
+}
+```
+
+
+
+
+
+```java
+private long sendProducerData(long now) {
+    Cluster cluster = metadata.fetch();
+    // get the list of partitions with data ready to send
+    RecordAccumulator.ReadyCheckResult result = this.accumulator.ready(cluster, now);
+
+    // if there are any partitions whose leaders are not known yet, force metadata update
+    if (!result.unknownLeaderTopics.isEmpty()) {
+        // The set of topics with unknown leader contains topics with leader election pending as well as
+        // topics which may have expired. Add the topic again to metadata to ensure it is included
+        // and request metadata update, since there are messages to send to the topic.
+        for (String topic : result.unknownLeaderTopics)
+            this.metadata.add(topic, now);
+
+        log.debug("Requesting metadata update due to unknown leader topics from the batched records: {}",
+            result.unknownLeaderTopics);
+        this.metadata.requestUpdate();
+    }
+
+    // remove any nodes we aren't ready to send to
+    Iterator<Node> iter = result.readyNodes.iterator();
+    long notReadyTimeout = Long.MAX_VALUE;
+    while (iter.hasNext()) {
+        Node node = iter.next();
+        if (!this.client.ready(node, now)) {
+            iter.remove();
+            notReadyTimeout = Math.min(notReadyTimeout, this.client.pollDelayMs(node, now));
+        }
+    }
+
+    // 从accumulator中获取待发送的消息
+    Map<Integer, List<ProducerBatch>> batches = this.accumulator.drain(cluster, result.readyNodes, this.maxRequestSize, now);
+    addToInflightBatches(batches);
+    if (guaranteeMessageOrder) {
+        // Mute all the partitions drained
+        for (List<ProducerBatch> batchList : batches.values()) {
+            for (ProducerBatch batch : batchList)
+                this.accumulator.mutePartition(batch.topicPartition);
+        }
+    }
+
+    accumulator.resetNextBatchExpiryTime();
+    List<ProducerBatch> expiredInflightBatches = getExpiredInflightBatches(now);
+    List<ProducerBatch> expiredBatches = this.accumulator.expiredBatches(now);
+    expiredBatches.addAll(expiredInflightBatches);
+
+    // Reset the producer id if an expired batch has previously been sent to the broker. Also update the metrics
+    // for expired batches. see the documentation of @TransactionState.resetIdempotentProducerId to understand why
+    // we need to reset the producer id here.
+    if (!expiredBatches.isEmpty())
+        log.trace("Expired {} batches in accumulator", expiredBatches.size());
+    for (ProducerBatch expiredBatch : expiredBatches) {
+        String errorMessage = "Expiring " + expiredBatch.recordCount + " record(s) for " + expiredBatch.topicPartition
+            + ":" + (now - expiredBatch.createdMs) + " ms has passed since batch creation";
+        failBatch(expiredBatch, -1, NO_TIMESTAMP, new TimeoutException(errorMessage), false);
+        if (transactionManager != null && expiredBatch.inRetry()) {
+            // This ensures that no new batches are drained until the current in flight batches are fully resolved.
+            transactionManager.markSequenceUnresolved(expiredBatch);
+        }
+    }
+    sensors.updateProduceRequestMetrics(batches);
+
+    // If we have any nodes that are ready to send + have sendable data, poll with 0 timeout so this can immediately
+    // loop and try sending more data. Otherwise, the timeout will be the smaller value between next batch expiry
+    // time, and the delay time for checking data availability. Note that the nodes may have data that isn't yet
+    // sendable due to lingering, backing off, etc. This specifically does not include nodes with sendable data
+    // that aren't ready to send since they would cause busy looping.
+    long pollTimeout = Math.min(result.nextReadyCheckDelayMs, notReadyTimeout);
+    pollTimeout = Math.min(pollTimeout, this.accumulator.nextExpiryTimeMs() - now);
+    pollTimeout = Math.max(pollTimeout, 0);
+    if (!result.readyNodes.isEmpty()) {
+        log.trace("Nodes with data ready to send: {}", result.readyNodes);
+        // if some partitions are already ready to be sent, the select time would be 0;
+        // otherwise if some partition already has some data accumulated but not ready yet,
+        // the select time will be the time difference between now and its linger expiry time;
+        // otherwise the select time will be the time difference between now and the metadata expiry time;
+        pollTimeout = 0;
+    }
+    sendProduceRequests(batches, now);
+    return pollTimeout;
+}
+```
+
+
+
+往后继续追看代码：
+
+```java
+/**
+ * Create a produce request from the given record batches
+ */
+private void sendProduceRequest(long now, int destination, short acks, int timeout, List<ProducerBatch> batches) {
+    if (batches.isEmpty())
+        return;
+
+    Map<TopicPartition, MemoryRecords> produceRecordsByPartition = new HashMap<>(batches.size());
+    final Map<TopicPartition, ProducerBatch> recordsByPartition = new HashMap<>(batches.size());
+
+    // find the minimum magic version used when creating the record sets
+    byte minUsedMagic = apiVersions.maxUsableProduceMagic();
+    for (ProducerBatch batch : batches) {
+        if (batch.magic() < minUsedMagic)
+            minUsedMagic = batch.magic();
+    }
+
+    for (ProducerBatch batch : batches) {
+        TopicPartition tp = batch.topicPartition;
+        MemoryRecords records = batch.records();
+
+        // down convert if necessary to the minimum magic used. In general, there can be a delay between the time
+        // that the producer starts building the batch and the time that we send the request, and we may have
+        // chosen the message format based on out-dated metadata. In the worst case, we optimistically chose to use
+        // the new message format, but found that the broker didn't support it, so we need to down-convert on the
+        // client before sending. This is intended to handle edge cases around cluster upgrades where brokers may
+        // not all support the same message format version. For example, if a partition migrates from a broker
+        // which is supporting the new magic version to one which doesn't, then we will need to convert.
+        if (!records.hasMatchingMagic(minUsedMagic))
+            records = batch.records().downConvert(minUsedMagic, 0, time).records();
+        produceRecordsByPartition.put(tp, records);
+        recordsByPartition.put(tp, batch);
+    }
+
+    String transactionalId = null;
+    if (transactionManager != null && transactionManager.isTransactional()) {
+        transactionalId = transactionManager.transactionalId();
+    }
+  	// 可以看到这里发送的Produce的消息类型
+    ProduceRequest.Builder requestBuilder = ProduceRequest.Builder.forMagic(minUsedMagic, acks, timeout,
+            produceRecordsByPartition, transactionalId);
+    RequestCompletionHandler callback = new RequestCompletionHandler() {
+        public void onComplete(ClientResponse response) {
+            handleProduceResponse(response, recordsByPartition, time.milliseconds());
+        }
+    };
+
+    String nodeId = Integer.toString(destination);
+  	// 生成Produce的消息类型
+    ClientRequest clientRequest = client.newClientRequest(nodeId, requestBuilder, now, acks != 0,
+            requestTimeoutMs, callback);
+  	// 组装成NetworkSend放到kafkaChannel中
+    client.send(clientRequest, now);
+    log.trace("Sent produce request to {}: {}", nodeId, requestBuilder);
+}
+```
+
+org.apache.kafka.common.protocol.ApiKeys
+
+```java
+
+PRODUCE(0, "Produce", ProduceRequest.schemaVersions(), ProduceResponse.schemaVersions()),
+```
+
+
+
+### 事务机制
+
+
 
 ## 网络收发流程
 
@@ -316,6 +903,7 @@ public List<ClientResponse> poll(long timeout, long now) {
         return responses;
     }
 
+  	// 向broker发送metadata消息请求并放到本地缓存中
     long metadataTimeout = metadataUpdater.maybeUpdate(now);
     try {
         this.selector.poll(Utils.min(timeout, metadataTimeout, defaultRequestTimeoutMs));
@@ -657,9 +1245,7 @@ public long readFrom(ScatteringByteChannel channel) throws IOException {
 
 
 
-## 启动流程
-
-
+### 启动流程
 
 Kafka server端的启动流程主要逻辑在KafkaServer.scala类中。
 
@@ -755,7 +1341,7 @@ def startup(): Unit = {
       tokenManager = new DelegationTokenManager(config, tokenCache, time , zkClient)
       tokenManager.startup()
 
-      /* start kafka controller */
+      /* 启动kafka控制器，其相当于master角色 */
       kafkaController = new KafkaController(config, zkClient, time, metrics, brokerInfo, brokerEpoch, tokenManager, threadNamePrefix)
       kafkaController.startup()
 
@@ -787,7 +1373,7 @@ def startup(): Unit = {
         new FetchSessionCache(config.maxIncrementalFetchSessionCacheSlots,
           KafkaServer.MIN_INCREMENTAL_FETCH_SESSION_EVICTION_MS))
 
-      /* start processing requests */
+      /*  */
       dataPlaneRequestProcessor = new KafkaApis(socketServer.dataPlaneRequestChannel, replicaManager, adminManager, groupCoordinator, transactionCoordinator,
         kafkaController, zkClient, config.brokerId, config, metadataCache, metrics, authorizer, quotaManagers,
         fetchManager, brokerTopicStats, clusterId, time, tokenManager)
@@ -839,15 +1425,39 @@ def startup(): Unit = {
 }
 ```
 
+### 组协调器
+
+
+
+### 事务管理器
 
 
 
 
-## 生产者事务机制
 
+### 控制器(controller)
 
+#### KafkaController
 
+```java
+def startup() = {
+  zkClient.registerStateChangeHandler(new StateChangeHandler {
+    override val name: String = StateChangeHandlers.ControllerHandler
+    override def afterInitializingSession(): Unit = {
+      eventManager.put(RegisterBrokerAndReelect)
+    }
+    override def beforeInitializingSession(): Unit = {
+      val queuedEvent = eventManager.clearAndPut(Expire)
 
+      // Block initialization of the new session until the expiration event is being handled,
+      // which ensures that all pending events have been processed before creating the new session
+      queuedEvent.awaitProcessing()
+    }
+  })
+  eventManager.put(Startup)
+  eventManager.start()
+}
+```
 
 
 
