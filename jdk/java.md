@@ -2025,11 +2025,276 @@ Java引用可分为强引用，软引用，弱引用和虚引用。
 
 
 
-# 网络
+# 反射
 
-## 字符
+
+
+## 动态代理
+
+JDK代理要求被代理的类必须实现接口，有很强的局限性。而CGLIB动态代理则没有此类强制性要求。简单的说，CGLIB会让生成的代理类继承被代理类，并在代理类中对代理方法进行强化处理(前置处理、后置处理等)。在CGLIB底层，其实是借助了ASM这个非常强大的Java字节码生成框架。
+
+### CGlib
+
+cglib基于AMS框架实现，是JDK动态代理的有效补充，可以用于AOP编程，比如日志打印、安全控制、统一鉴权等。
+
+参考：
+
+https://www.cnblogs.com/xrq730/p/6661692.html
+
+示例：
+
+```java
+package net.sf.cglib.samples;
+import net.sf.cglib.proxy.*;
+import java.util.*;
+/**
+ *
+ * @author  baliuka
+ */
+public class Trace implements MethodInterceptor {
+    
+    int ident = 1;
+    static Trace callback = new Trace();
+    
+    /** Creates a new instance of Trace */
+    private Trace() {
+    }
+    
+    public static  Object newInstance( Class clazz ){
+      try{
+            Enhancer e = new Enhancer();
+            e.setSuperclass(clazz);
+            e.setCallback(callback);
+            return e.create();
+      }catch( Throwable e ){
+         e.printStackTrace(); 
+         throw new Error(e.getMessage());
+      }  
+    
+    }
+    /**
+     * @param args the command line arguments
+     */
+    public static void main(String[] args) {
+        List list = (List)newInstance(Vector.class);
+        Object value = "TEST";
+        list.add(value);
+        list.contains(value);
+        try{
+         list.set(2, "ArrayIndexOutOfBounds" );
+        }catch( ArrayIndexOutOfBoundsException ignore ){
+        
+        }
+       list.add(value + "1");
+       list.add(value + "2");
+       list.toString();
+       list.equals(list); 
+       list.set( 0, null ); 
+       list.toString();
+       list.add(list);
+       list.get(1);
+       list.toArray();
+       list.remove(list);
+       list.remove("");
+       list.containsAll(list);
+       list.lastIndexOf(value);
+    }
+
+
+    public Object intercept(Object obj, java.lang.reflect.Method method, Object[] args,
+                            MethodProxy proxy) throws Throwable {
+        printIdent(ident);
+        System.out.println( method );
+        for( int i = 0; i < args.length; i++ ){
+          printIdent(ident);   
+          System.out.print( "arg" + (i + 1) + ": ");
+          if( obj == args[i])
+              System.out.println("this");
+          else
+              System.out.println(args[i]);
+        }
+        ident++;
+
+        Object retValFromSuper = null;
+        try {
+            retValFromSuper = proxy.invokeSuper(obj, args);
+            ident--;
+        } catch (Throwable t) {
+            ident--;
+            printIdent(ident);   
+            System.out.println("throw " + t );  
+            System.out.println();
+            throw t.fillInStackTrace();
+        }
+        
+        printIdent(ident); 
+        System.out.print("return " );
+        if( obj == retValFromSuper)
+            System.out.println("this");
+        else System.out.println(retValFromSuper);
+        
+        if(ident == 1)
+             System.out.println();
+        
+        return retValFromSuper;
+    }
+    
+   void printIdent( int ident ){
+       
+    
+       while( --ident > 0 ){
+         System.out.print(".......");
+       }
+      System.out.print("  ");
+   }
+    
+}
+```
+
+
+
+### JDK动态代理
+
+jdk动态代理使用的是java的动态编译技术。使用Proxy的newInstance动态编译一个新的class文件来代理所有符合条件的类的方法。
+
+实例。比如我们在Flink的任务管理场景中使用了动态代理技术进行rpc的调用。
+
+```java
+// 需要被代理的类。
+public class ActionImpl implements Action {
+	@Override
+	public void do1(String param) {
+		System.out.println("do1  " + param);
+	}
+
+	@Override
+	public void do2(String param) {
+		System.out.println("do2  " + param);
+	}
+}
+// 代理类实现
+public class ActionProxy implements InvocationHandler {
+   private Action action;
+
+   public ActionProxy(Action action) {
+      this.action = action;
+   }
+
+   @Override
+   public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+      System.out.println("--------------do begin-------------");
+      Object invoke = method.invoke(action, args);
+      System.out.println("--------------do end-------------");
+      return invoke;
+   }
+}
+```
+
+
+
+通过java.lang.reflect.Proxy.ProxyClassFactory#apply拦截新生成的class文件，反编译后新生成的class文件如下，从如下文件可以看出，当调用被代理类的方法时都会走InvocationHandler的实现接口进行代理调用。
+
+```java
+//
+// Source code recreated from a .class file by IntelliJ IDEA
+// (powered by Fernflower decompiler)
+//
+
+package com.sun.proxy;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.lang.reflect.UndeclaredThrowableException;
+import proxy.Action;
+
+public final class $Proxy0 extends Proxy implements Action {
+    private static Method m1;
+    private static Method m4;
+    private static Method m2;
+    private static Method m3;
+    private static Method m0;
+
+    public $Proxy0(InvocationHandler var1) throws  {
+        super(var1);
+    }
+
+    public final boolean equals(Object var1) throws  {
+        try {
+            return (Boolean)super.h.invoke(this, m1, new Object[]{var1});
+        } catch (RuntimeException | Error var3) {
+            throw var3;
+        } catch (Throwable var4) {
+            throw new UndeclaredThrowableException(var4);
+        }
+    }
+
+    public final void do1(String var1) throws  {
+        try {
+            super.h.invoke(this, m4, new Object[]{var1});
+        } catch (RuntimeException | Error var3) {
+            throw var3;
+        } catch (Throwable var4) {
+            throw new UndeclaredThrowableException(var4);
+        }
+    }
+
+    public final String toString() throws  {
+        try {
+            return (String)super.h.invoke(this, m2, (Object[])null);
+        } catch (RuntimeException | Error var2) {
+            throw var2;
+        } catch (Throwable var3) {
+            throw new UndeclaredThrowableException(var3);
+        }
+    }
+
+    public final void do2(String var1) throws  {
+        try {
+            super.h.invoke(this, m3, new Object[]{var1});
+        } catch (RuntimeException | Error var3) {
+            throw var3;
+        } catch (Throwable var4) {
+            throw new UndeclaredThrowableException(var4);
+        }
+    }
+
+    public final int hashCode() throws  {
+        try {
+            return (Integer)super.h.invoke(this, m0, (Object[])null);
+        } catch (RuntimeException | Error var2) {
+            throw var2;
+        } catch (Throwable var3) {
+            throw new UndeclaredThrowableException(var3);
+        }
+    }
+
+    static {
+        try {
+            m1 = Class.forName("java.lang.Object").getMethod("equals", Class.forName("java.lang.Object"));
+            m4 = Class.forName("proxy.Action").getMethod("do1", Class.forName("java.lang.String"));
+            m2 = Class.forName("java.lang.Object").getMethod("toString");
+            m3 = Class.forName("proxy.Action").getMethod("do2", Class.forName("java.lang.String"));
+            m0 = Class.forName("java.lang.Object").getMethod("hashCode");
+        } catch (NoSuchMethodException var2) {
+            throw new NoSuchMethodError(var2.getMessage());
+        } catch (ClassNotFoundException var3) {
+            throw new NoClassDefFoundError(var3.getMessage());
+        }
+    }
+}
+
+```
+
+
+
+# 输入输出流
+
+## 字符与字节缓冲类
 
 ### CharBuffer
+
+StringCharBuffer
 
 ### ByteBuffer
 
@@ -2039,32 +2304,63 @@ Java引用可分为强引用，软引用，弱引用和虚引用。
 
 #### HeapByteBuffer
 
+## Stream
 
+流可以分为字符流和字节流，归根结底所有的流都是文件流，包括socket和实际的磁盘文件等。JDK实现了两个大类用来读取和写入数据，包括InputStream和OutputStream实现。
 
 ### InputStream
 
-| 实现类               | 用途 |      |
-| -------------------- | ---- | ---- |
-| FilterInputStream    |      |      |
-| BufferedInputStream  |      |      |
-| ByteArrayInputStream |      |      |
-| DataInputStream      |      |      |
-| FilterInputStream    |      |      |
+InputStream是输入流，用来将source的数据读成**字节流**的形式。
+
+| 实现类               | 用途                                             |      |
+| -------------------- | ------------------------------------------------ | ---- |
+| FilterInputStream    |                                                  |      |
+| BufferedInputStream  | 缓冲区固定，可以来回读取                         |      |
+| ByteArrayInputStream |                                                  |      |
+| DataInputStream      | 输入流工具类，可以将字节流读取成原始的java类型。 |      |
+| FileInputStream      | file流读取类                                     |      |
+| SocketInputStream    | socket流读取类                                   |      |
+
+SocketOutputStream.java相关实现：
+
+```java
+SocketOutputStream(AbstractPlainSocketImpl impl) throws IOException {
+    super(impl.getFileDescriptor());
+    this.impl = impl;
+    socket = impl.getSocket();
+}
+```
+
+为了将字节流读取成字符流的形式，JDK实现了Reader接口，用来从输入流中将字节流转变为**字符流**。其接口为
+
+java.io.Reader，主要的实现类有：
+
+| 实现类            | 用途                                                         |
+| ----------------- | ------------------------------------------------------------ |
+| InputStreamReader | 封装了StreamDecoder实现，将输入字节流转变为字符流。          |
+| BufferedReader    | 固定大小缓冲区，用于从source中读取缓冲的字符流数据。         |
+| CharArrayReader   | 无固定缓冲区大小                                             |
+| FileReader        | 文件读取工具类。继承了InputStreamReader类，用于将文件读取到字符数组中。 |
 
 
-
-#### FilterInputStream
 
 ### OutputStream
 
+OutputStream是一个抽象类，代表常见的输出流，操作字节流并将其写入sink端。常见的实现包括以下几种。
+
+| 实现类                | 用途                                                         |      |
+| --------------------- | ------------------------------------------------------------ | ---- |
+| BufferedOutputStream  | 缓冲输出流，新生成对象时为固定字节，超出后会flush到sink端。  |      |
+| ByteArrayOutputStream | 缓冲输出流，新生成对象时为固定字节，超出后会动态分配内存。工具类，可以将自己流转变为字节数组 |      |
+| DataOutputStream      | 可以将原生的Java类型，比如Int,boolean转变为字节流            |      |
+| FilterOutputStream    | 支持按照指定位置进行字节写入                                 |      |
+| FileOutputStream      | 主要用来将输出流写到文件中。                                 |      |
+| ObjectOutputStream    | 顾名思义，此类可以将实现了序列化的Java Bean变为字节数组。    |      |
+| PipedOutputStream     |                                                              |      |
 
 
-| 实现类                | 用途 |      |
-| --------------------- | ---- | ---- |
-| BufferedOutputStream  |      |      |
-| ByteArrayOutputStream |      |      |
-| DataOutputStream      |      |      |
-| FilterOutputStream    |      |      |
+
+
 
 # Java同步机制
 
@@ -2938,6 +3234,14 @@ cas是一种乐观锁，jdk内部有很多使用此机制实现同步的类和�
 
 加版本号的方法。
 
+## Object
+
+wait/notify和lock区别如下图所示：
+
+![image-20210220143020522](images/image-20210220143020522.png)
+
+
+
 
 
 ## FutureTask
@@ -3014,9 +3318,13 @@ futureTask是一种异步等待线程执行结果的机制。
 
 ## 函数式接口
 
-
-
 函数式接口(Functional Interface)就是一个有且仅有一个抽象方法，但是可以有多个非抽象方法的接口。
+
+### 常用函数式接口
+
+#### CompletableFuture
+
+
 
 ### 使用场景
 

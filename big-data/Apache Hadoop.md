@@ -242,6 +242,8 @@ https://zhuanlan.zhihu.com/p/61774441
 
 
 
+![Overview of ResourceManager High Availability](images/rm-ha-overview.png)
+
 
 
 # Hive
