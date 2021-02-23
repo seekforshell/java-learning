@@ -52,11 +52,49 @@ kafka是一个流处理（实时和离线）平台。所以从kafka的使命来�
 
 
 
+## 高水位
+
+
+
 ## 事务
 
 <img src="images/kafka_txn.png" alt="image-20201118101425188" style="zoom: 33%;" />
 
 https://cwiki.apache.org/confluence/display/KAFKA/KIP-98+-+Exactly+Once+Delivery+and+Transactional+Messaging#KIP98ExactlyOnceDeliveryandTransactionalMessaging-DataFlow
+
+#  生产者
+
+### 常见配置
+
+
+
+| 配置                                                         | 参数及意义                                                   | 作用                                                 |
+| ------------------------------------------------------------ | ------------------------------------------------------------ | ---------------------------------------------------- |
+| acks                                                         | 0:不要求leader做任何动作，生产者发送消息即认为成功，消息是否正常传递到leader不做任何保证<br>1:leader需要写消息到本地日志但是不需要等到所有follower的确定即可任务消息发送成功，如果此时leader挂掉了，那么消息也会丢掉<br>all(-1)：需要等待所有follower写完本地日志回复给leader，完成isr才回复给生产者；写本地日志是会更新 | 生产者发送消息到leader，leader需要收到确认消息的个数 |
+| batch.size                                                   | 批量发送到同一个分区的消息大小个数，可设置合适大小提高吞吐量 |                                                      |
+| [client.id](http://kafka.apache.org/25/documentation.html#client.id) | 客户端id，用于区分生产者                                     |                                                      |
+| partitioner.class                                            | 分区选择类实现，发送的消息如何选择送往哪个分区               |                                                      |
+| enable.idempotence                                           | 是否支持精确一致性的消息发送。如果设置为false则可能会导致重复消息，如果设置成true，那么acks必须设置成all，同时retires大于0，max.in.flight.requests.per.connection小于等于5 |                                                      |
+| transactional.id                                             | 事务id，对于使用了相同事务id的多个producer需要等待前一个事务完成才能开启新的事务，保持事务的隔离性。同时需要设置幂等性参数为true。 |                                                      |
+
+
+
+
+
+# 消费者
+
+
+
+## 常见配置
+
+| 配置                     | 参数及意义                                                   | 作用                                             |
+| ------------------------ | ------------------------------------------------------------ | ------------------------------------------------ |
+| group.id                 | 消费者所属的消费者组                                         |                                                  |
+| allow.auto.create.topics | 是否允许自动创建topic，只有在broker使能才起作用              |                                                  |
+| allow.auto.create.topics |                                                              |                                                  |
+| isolation.level          | 字符串类型，“read_uncommitted”和“read_committed”，表示消费者所消费到的位置，如果设置为“read_committed"，那么消费这就会忽略事务未提交的消息，既只能消费到LSO(LastStableOffset)的位置，默认情况下，”read_uncommitted",既可以消费到HW（High Watermak）的位置。 | 默认值：read_uncommitted，其他值：read_committed |
+
+
 
 # FAQ
 
@@ -105,9 +143,25 @@ kafka如何保证事务的一致性？
 ### **为什么Kafka不支持读写分离？**
 
 
+
+
 # 应用场景
 
+## 消息系统
 
+
+
+| 消息      | Kafka                                                 | RabbitMq | ActiveMQ |
+| --------- | ----------------------------------------------------- | -------- | -------- |
+| 可靠性-Ha |                                                       |          |          |
+| 有序性    | 天然有序，同一个分区以队列方式                        |          |          |
+| 消息延时  |                                                       |          |          |
+| 吞吐量    | 顺序写，支持磁盘持久化，并且pageCache和zeroCopy等技术 |          |          |
+|           |                                                       |          |          |
+
+参考文档：
+
+https://mp.weixin.qq.com/s?__biz=MzI3NDAwNDUwNg%3D%3D&mid=2648307598&idx=1&sn=eeaa9d795ef6ba13368e7a76ca14bae7&scene=45#wechat_redirect
 
 ## 核心功能
 

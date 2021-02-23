@@ -76,9 +76,9 @@ https://www.jianshu.com/p/db8dce09232d
 
 #### 基本原理
 
-SynchronousQueue是一个很有意思的队列，号称实现无锁同步，内部不存储任何元素，仅仅借助节点的状态和cas操作实现同步，假如没有消费者消费，也会造成生产者睡眠
+SynchronousQueue是一个很有意思的队列，号称实现无锁同步，内部不存储任何元素，仅仅借助节点的状态和cas操作实现同步。
 
-下图是我示例程序head的一个镜像信息，从这里可以看出同步队里并不是不存信息，而是放到了栈中或者队列中。
+下图是我示例程序head的一个镜像信息，从这里可以看出同步队里并不是不存信息，而是放到了栈中或者队列（单链表）中。
 
 ```java
 import java.util.Arrays;
@@ -129,13 +129,14 @@ tansferer有两种实现。一种TransferStack(LIFO)，一种是TransferQueue(FI
 ```java
 // take
 public E take() throws InterruptedException {
+ 	// 传入的item为空，timed为false,超时时间为0
   E e = transferer.transfer(null, false, 0);
   if (e != null)
     return e;
   Thread.interrupted();
   throw new InterruptedException();
 }
-// put
+// put 阻塞操作
 public void put(E e) throws InterruptedException {
     if (e == null) throw new NullPointerException();
     if (transferer.transfer(e, false, 0) == null) {
@@ -143,19 +144,24 @@ public void put(E e) throws InterruptedException {
         throw new InterruptedException();
     }
 }
+
+// offer 非阻塞操作返回值为空，offer这里的返回值表示是否加入到队列中去
+public boolean offer(E e) {
+  if (e == null) throw new NullPointerException();
+  return transferer.transfer(e, true, 0) != null;
+}
 ```
 
 下面以TransferStack的实现来进行分析，TransferQueue原理类似。
 
-transfer代码的分析，需要理解FULFILLING的概念，当栈中有数据，当前的take操作则为fullfiling，之前的put则awaitFulfill，反之亦然。
+transfer代码的分析，需要理解FULFILLING的概念，当栈中有数据，当前的put操作则为fullfiling，之前的take则awaitFulfill，反之亦然。
 
 也就是说生产数据和消费数据的线程在同步队列中互为顾客，都有需求和满足需求的角色。
 
 栈/队列中node的三种角色。
 
 ```java
-/* Modes for SNodes, ORed together in node fields */
-/** Node represents an unfulfilled consumer */
+// 请求数据，当数据为null，即task
 static final int REQUEST    = 0;
 /** Node represents an unfulfilled producer */
 static final int DATA       = 1;
@@ -171,41 +177,23 @@ static final int FULFILLING = 2;
  */
 @SuppressWarnings("unchecked")
 E transfer(E e, boolean timed, long nanos) {
-    /*
-     * Basic algorithm is to loop trying one of three actions:
-     *
-     * 1. If apparently empty or already containing nodes of same
-     *    mode, try to push node on stack and wait for a match,
-     *    returning it, or null if cancelled.
-     *
-     * 2. If apparently containing node of complementary mode,
-     *    try to push a fulfilling node on to stack, match
-     *    with corresponding waiting node, pop both from
-     *    stack, and return matched item. The matching or
-     *    unlinking might not actually be necessary because of
-     *    other threads performing action 3:
-     *
-     * 3. If top of stack already holds another fulfilling node,
-     *    help it out by doing its match and/or pop
-     *    operations, and then continue. The code for helping
-     *    is essentially the same as for fulfilling, except
-     *    that it doesn't return the item.
-     */
-
+   
     SNode s = null; // constructed/reused as needed
   	// 如果是take则mode为request,put则为data
     int mode = (e == null) ? REQUEST : DATA;
 
     for (;;) {
         SNode h = head;
-      	// 1.如果栈中为空或者栈顶都为put或者request操作：此情形适用于连续take或者put的场景。
-      	// 2.条件不成立时，说明之前的请求模式必然和自己的不同，也就是说上一个请求必然是'顾客'
+      	// 1.如果栈中为空或者栈顶都为DATA模式或者request模式：此情形适用于连续take或者put的场景。
+      	// 2.步骤1条件不成立时，说明之前的请求模式必然和自己的不同，也就是说上一个请求必然是'顾客'
         if (h == null || h.mode == mode) {  // empty or same-mode
-            if (timed && nanos <= 0) {      // can't wait
+          	// 这里对于poll和offer操作而言，没有就返回空并不会把数据放到队列中，这也是符合阻塞接口定义的
+            if (timed && nanos <= 0) {      // can't wait:offer or poll
                 if (h != null && h.isCancelled())
                     casHead(h, h.next);     // pop cancelled node
                 else
                     return null;
+            // 对于阻塞接口，比如take和put会走此流程，加入到队列中
             } else if (casHead(h, s = snode(s, e, h, mode))) {
                 SNode m = awaitFulfill(s, timed, nanos);
                 if (m == s) {               // wait was cancelled
@@ -223,7 +211,9 @@ E transfer(E e, boolean timed, long nanos) {
                 casHead(h, h.next);         // pop and retry
           	// 入栈，并设置mode为FULFILLING，使‘顾客’在awaitFulfill时得到满足
             else if (casHead(h, s=snode(s, e, h, FULFILLING|mode))) {
+              	// 这里在take时会出现非公平竞争，所以stack是非公平的
                 for (;;) { // loop until matched or waiters disappear
+                  	// 因此s已经被设置为head，那么next就是它需要消费的节点
                     SNode m = s.next;       // m is s's match
                     if (m == null) {        // all waiters are gone
                         casHead(s, null);   // pop fulfill node
@@ -231,8 +221,10 @@ E transfer(E e, boolean timed, long nanos) {
                         break;              // restart main loop
                     }
                     SNode mn = m.next;
-                  	// 设置'顾客'匹配到的matcher：数据，如果'顾客'超时进行了park则unpark
+                  	// 设置'生产者'去提供消费者需要的数据
+                  	// 设置s的match为m的数据，唤醒生产者
                     if (m.tryMatch(s)) {
+                      	// 将匹配到的生产者m和消费者s出栈
                         casHead(s, mn);     // pop both s and m
                         return (E) ((mode == REQUEST) ? m.item : s.item);
                     } else                  // lost match
@@ -304,34 +296,21 @@ SNode awaitFulfill(SNode s, boolean timed, long nanos) {
             LockSupport.park(this);
         else if (nanos > spinForTimeoutThreshold)
             LockSupport.parkNanos(this, nanos);
-    }
-}
+  }
 ```
-
-
-
-
-
-
-
-
-
-
-
-
 
 ### 阻塞队列
 
 想要了解什么是阻塞队列，其实现了什么功能？最好了解下其实现的接口定义：
 
-| 方法                                                         | 是否阻塞 | 说明                 |
-| ------------------------------------------------------------ | -------- | -------------------- |
-| boolean add(E e)                                             | N        | 违反空间大小时会报错 |
-| boolean offer(E e)                                           | N        |                      |
-| boolean offer(E e, long timeout, TimeUnit unit)<br/>        throws InterruptedException | N        | 超时机制             |
-| void put(E e) throws InterruptedException                    | Y        | 添加队列元素         |
-| E take() throws InterruptedException                         | Y        | 获取队列元素         |
-| E poll(long timeout, TimeUnit unit)<br/>        throws InterruptedException | N        | 支持轮询             |
+| 方法                                                         | 是否阻塞 | 说明                                                         |
+| ------------------------------------------------------------ | -------- | ------------------------------------------------------------ |
+| boolean add(E e)                                             | N        | 违反空间大小时会报错                                         |
+| boolean offer(E e)                                           | N        | 只是尝试去加，不会阻塞；与put不同                            |
+| boolean offer(E e, long timeout, TimeUnit unit)<br/>        throws InterruptedException | N        | 超时机制                                                     |
+| void put(E e) throws InterruptedException                    | Y        | 添加队列元素，阻塞接口                                       |
+| E take() throws InterruptedException                         | Y        | 获取队列元素，阻塞接口                                       |
+| E poll(long timeout, TimeUnit unit)<br/>        throws InterruptedException | N        | 尝试去获取，支持轮询，不一定要获取到；与task不一样，take是会一直获取，会阻塞 |
 
 
 
@@ -547,6 +526,8 @@ private void enqueue(Node<E> node) {
 #### LinkedTransferQueue
 
 #### SynchronousQueue
+
+见上。
 
 #### LinkedTransferQueue
 
@@ -1543,8 +1524,6 @@ public enum State {
 
 ## ThreadPoolExecutor
 
-
-
 ### 综述
 
 ```java
@@ -1699,9 +1678,36 @@ public interface Executor {
 
 
 
-#### 设计思想
+#### 常见线程池
 
-### 源代码
+
+
+```java
+
+// 缓冲线程池
+// 缓冲线程池最大的不同点在于其阻塞队列为同步队列，此同步队列在内部维护了一个FIFO队列（公平）
+// 线程池在submitTask时会offerTaskQueue()，由于同步队列不会存元素，所以总是返回false，此时线程池
+// 根据最大线程池数来分配线程
+public static ExecutorService newCachedThreadPool(ThreadFactory threadFactory) {
+  return new ThreadPoolExecutor(0, Integer.MAX_VALUE,
+                                60L, TimeUnit.SECONDS,
+                                new SynchronousQueue<Runnable>(),
+                                threadFactory);
+}
+// 单独线程池，核心线程出和最大线程数都为1
+public static ExecutorService newSingleThreadExecutor() {
+    return new FinalizableDelegatedExecutorService
+        (new ThreadPoolExecutor(1, 1,
+                                0L, TimeUnit.MILLISECONDS,
+                                new LinkedBlockingQueue<Runnable>()));
+}
+
+public ScheduledThreadPoolExecutor(int corePoolSize,
+                                   ThreadFactory threadFactory) {
+  super(corePoolSize, Integer.MAX_VALUE, 0, NANOSECONDS,
+        new DelayedWorkQueue(), threadFactory);
+}
+```
 
 #### 数据结构
 
@@ -1733,92 +1739,38 @@ private final class Worker
 }
 ```
 
-#### Worker
 
 
 
-Worker是工作线程的主体实现，是runnable或者callable的执行者。
 
+### 任务提交流程
 
+任务执行流程如下：
+
+```
+submit->execute(Runnable cmd)->addWorker
+```
+
+#### 1) submit
 
 ```java
-private final class Worker
-    extends AbstractQueuedSynchronizer
-    implements Runnable
-{
-    /**
-     * This class will never be serialized, but we provide a
-     * serialVersionUID to suppress a javac warning.
-     */
-    private static final long serialVersionUID = 6138294804551838833L;
-
-    /** Thread this worker is running in.  Null if factory fails. */
-    final Thread thread;
-    /** Initial task to run.  Possibly null. */
-    Runnable firstTask;
-    /** Per-thread task counter */
-    volatile long completedTasks;
-
-    /**
-     * Creates with given first task and thread from ThreadFactory.
-     * @param firstTask the first task (null if none)
-     */
-    Worker(Runnable firstTask) {
-        setState(-1); // inhibit interrupts until runWorker
-        this.firstTask = firstTask;
-        this.thread = getThreadFactory().newThread(this);
-    }
-
-    /** Delegates main run loop to outer runWorker  */
-    public void run() {
-        runWorker(this);
-    }
-
-    // Lock methods
-    //
-    // The value 0 represents the unlocked state.
-    // The value 1 represents the locked state.
-
-    protected boolean isHeldExclusively() {
-        return getState() != 0;
-    }
-
-    protected boolean tryAcquire(int unused) {
-        if (compareAndSetState(0, 1)) {
-            setExclusiveOwnerThread(Thread.currentThread());
-            return true;
-        }
-        return false;
-    }
-
-    protected boolean tryRelease(int unused) {
-        setExclusiveOwnerThread(null);
-        setState(0);
-        return true;
-    }
-
-    public void lock()        { acquire(1); }
-    public boolean tryLock()  { return tryAcquire(1); }
-    public void unlock()      { release(1); }
-    public boolean isLocked() { return isHeldExclusively(); }
-
-    void interruptIfStarted() {
-        Thread t;
-        if (getState() >= 0 && (t = thread) != null && !t.isInterrupted()) {
-            try {
-                t.interrupt();
-            } catch (SecurityException ignore) {
-            }
-        }
-    }
+public <T> Future<T> submit(Callable<T> task) {
+    if (task == null) throw new NullPointerException();
+  	// 生成FutureTask，FutureTask实现了Runnable和Future接口
+    RunnableFuture<T> ftask = newTaskFor(task);
+  	// 执行任务
+    execute(ftask);
+    return ftask;
 }
 ```
 
+#### 2) execute
 
+执行任务有个核心逻辑：
 
-#### execute
+如果小于核心线程数则添加工作线程（Worker）；核心线程数用完后提交任务到阻塞队列；
 
-执行实现Runnable的线程。
+队列满后利用继续添加工作线程，数量最多为maximumPoolSize-corePoolSize
 
 ```java
 public void execute(Runnable command) {
@@ -1831,9 +1783,9 @@ public void execute(Runnable command) {
             return;
         c = ctl.get();
     }
-  	// 2.线程处于运行状态并且工作队列添加成功,执行:
-  	// 2.a再次检查状态，如果不处于运行状态则拒绝提交任务
-  	// 2.b 工作线程为0，则添加到最大线程。（适用于缓存线程池的场景）
+  	// 2.核心线程用完后添加到工作队列
+  	// 2.a 再次检查状态，如果不处于运行状态则拒绝提交任务
+  	// 2.b 当核心线程数为0，则添加到最大线程（最大线程大于0）。（适用于缓存线程池的场景）
   	// 否则执行步骤3
     if (isRunning(c) && workQueue.offer(command)) {
         int recheck = ctl.get();
@@ -1842,24 +1794,31 @@ public void execute(Runnable command) {
         else if (workerCountOf(recheck) == 0)
             addWorker(null, false);
     }
-  	// 3.工作队列添加失败后才添加才继续申请线程，失败后拒绝
+  	// 3.工作队列（isfull）添加失败后才添加才继续申请工作线程到指定的最大线程数，失败后拒绝
     else if (!addWorker(command, false))
         reject(command);
 }
 ```
 
-##### addWorker
+执行流程的主要核心流程包括**添加工作线程**和**执行工作线程**两个部分，下面将逐一讲解：
+
+##### 添加工作线程
+
+addWorker
 
 添加工作线程主体逻辑。参数core表示是否添加核心线程以外的线程。
 
 这里主体逻辑可以分为两个阶段：
 
-a.workercount计数修改。这里用到了cas机制
+a.使用CAS锁机制，同步增加线程池中工作线程的数量
 
 b.添加工作线程到hashset中
 
 ```java
+
+// core:此参数表示添加的工作线程是否是核心线程还是最大线程范围内的
 private boolean addWorker(Runnable firstTask, boolean core) {
+  	// 1.增加线程池中工作线程的数量
     retry:
     for (;;) {
         int c = ctl.get();
@@ -1890,7 +1849,7 @@ private boolean addWorker(Runnable firstTask, boolean core) {
             // else CAS failed due to workerCount change; retry inner loop
         }
     }
-
+    // 2.生成新的工作线程并运行
     boolean workerStarted = false;
     boolean workerAdded = false;
     Worker w = null;
@@ -1898,6 +1857,7 @@ private boolean addWorker(Runnable firstTask, boolean core) {
         w = new Worker(firstTask);
         final Thread t = w.thread;
         if (t != null) {
+          	// 全局锁，临界资源为hashset
             final ReentrantLock mainLock = this.mainLock;
             mainLock.lock();
             try {
@@ -1937,9 +1897,15 @@ private boolean addWorker(Runnable firstTask, boolean core) {
 }
 ```
 
-##### runWorker
+##### 运行工作线程
 
 运行工作线程主体逻辑。如果worker中的task为空，则从队列中取，在lock之前线程是可以被打断的。
+
+1.
+
+2.
+
+3.
 
 ```java
 final void runWorker(Worker w) {
@@ -1949,7 +1915,9 @@ final void runWorker(Worker w) {
     w.unlock(); // allow interrupts
     boolean completedAbruptly = true;
     try {
+      	// 1.任务不为空则执行当前任务，为空则从工作队列中阻塞获取，阻塞过程是可以被中断的
         while (task != null || (task = getTask()) != null) {
+          	// 2.获取局部锁
             w.lock();
             // If pool is stopping, ensure thread is interrupted;
             // if not, ensure thread is not interrupted.  This
@@ -1964,6 +1932,7 @@ final void runWorker(Worker w) {
                 beforeExecute(wt, task);
                 Throwable thrown = null;
                 try {
+                  	// 执行任务
                     task.run();
                 } catch (RuntimeException x) {
                     thrown = x; throw x;
@@ -1982,12 +1951,81 @@ final void runWorker(Worker w) {
         }
         completedAbruptly = false;
     } finally {
+      	// 执行线程退出的清理工作
         processWorkerExit(w, completedAbruptly);
     }
 }
 ```
 
+清理线程：
 
+工作线程退出时会走到此流程，用户程序异常或者没有需要执行的任务时会走到此流程
+
+```java
+private void processWorkerExit(Worker w, boolean completedAbruptly) {
+    if (completedAbruptly) // If abrupt, then workerCount wasn't adjusted
+        decrementWorkerCount();
+
+    final ReentrantLock mainLock = this.mainLock;
+    mainLock.lock();
+    try {
+        completedTaskCount += w.completedTasks;
+        workers.remove(w);
+    } finally {
+        mainLock.unlock();
+    }
+
+  	// 尝试终止线程池：这里会等待工作线程数量为0才会整正将状态设置为TERMINATED
+    tryTerminate();
+
+    int c = ctl.get();
+    if (runStateLessThan(c, STOP)) {
+        if (!completedAbruptly) {
+            int min = allowCoreThreadTimeOut ? 0 : corePoolSize;
+            if (min == 0 && ! workQueue.isEmpty())
+                min = 1;
+            if (workerCountOf(c) >= min)
+                return; // replacement not needed
+        }
+        addWorker(null, false);
+    }
+}
+
+
+final void tryTerminate() {
+  for (;;) {
+    int c = ctl.get();
+    // 对于运行状态或者shutdown状态并且工作队列不为空等情况不做处理直接返回
+    if (isRunning(c) ||
+        runStateAtLeast(c, TIDYING) ||
+        (runStateOf(c) == SHUTDOWN && ! workQueue.isEmpty()))
+      return;
+    // 对于工作线程数不等于0的直接返回不处理
+    if (workerCountOf(c) != 0) { // Eligible to terminate
+      interruptIdleWorkers(ONLY_ONE);
+      return;
+    }
+
+    final ReentrantLock mainLock = this.mainLock;
+    mainLock.lock();
+    try {
+      if (ctl.compareAndSet(c, ctlOf(TIDYING, 0))) {
+        try {
+          terminated();
+        } finally {
+          ctl.set(ctlOf(TERMINATED, 0));
+          // 条件锁，通知等待线程
+          termination.signalAll();
+        }
+        return;
+      }
+    } finally {
+      mainLock.unlock();
+    }
+    // else retry on failed CAS
+  }
+}
+```
 
 # 引用
 
@@ -3244,15 +3282,40 @@ wait/notify和lock区别如下图所示：
 
 
 
-## FutureTask
+## 异步计算工具类
 
+### FutureTask
 
+FutureTask类实现了Runnable和Future接口，对异步计算进行管理和计算结果进行获取。
 
-todo
+```java
+public interface Future<V> {
+    boolean cancel(boolean mayInterruptIfRunning);
+
+    boolean isCancelled();
+
+    boolean isDone();
+
+    V get() throws InterruptedException, ExecutionException;
+
+    V get(long timeout, TimeUnit unit)
+        throws InterruptedException, ExecutionException, TimeoutException;
+}
+```
 
 futureTask是一种异步等待线程执行结果的机制。
 
+### CompletableFuture
 
+由于futureTask在进行异步计算结果获取的时候需要阻塞等待结果，使得异步计算结果变得效率较低。此类是1.8出现的异步计算类，此类实现了CompletionStage接口。
+
+ CompletableFuture 为我们提供了非常多的方法， 笔者将其所有方法按照功能分类如下：
+
+1. 对一个或多个 Future 合并操作，生成一个新的 Future， 参考 allOf，anyOf，runAsync， supplyAsync。
+2. 为 Future 添加后置处理动作， thenAccept， thenApply， thenRun。
+3. 两个人 Future 任一或全部完成时，执行后置动作：applyToEither， acceptEither， thenAcceptBothAsync， runAfterBoth，runAfterEither 等。
+4. 当 Future 完成条件满足时，异步或同步执行后置处理动作： thenApplyAsync， thenRunAsync。所有异步后置处理都会添加 Async 后缀。
+5. 定义 Future 的处理顺序 thenCompose 协同存在依赖关系的 Future，thenCombine。合并多个 Future的处理结果返回新的处理结果。
 
 ## 锁的使用场景
 
