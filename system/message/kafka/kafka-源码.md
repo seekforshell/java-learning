@@ -593,9 +593,693 @@ org.apache.kafka.common.protocol.ApiKeys
 PRODUCE(0, "Produce", ProduceRequest.schemaVersions(), ProduceResponse.schemaVersions()),
 ```
 
+## 幂等性
+
+首先需要明确的是Kafka的幂等性仅仅实现了分区为单元，如果想要跨分区多会话的场景。
+
+kafka如何保持幂等性？引入了PID（epoch）和seq的概念。
+
+首先seq在哪里分配的？主流程如下，broker端收到生产者发送的消息后，如果ack=0则不需要回复消息，否则回复ProduceResponse消息，客户端回调处理，将seq更新，如果报错则重发报文从而实现幂等性
+
+下面是生产者在发送过程中分配RecordBatch的流程：
+
+org.apache.kafka.clients.producer.internals.Sender#runOnce
+
+org.apache.kafka.clients.producer.internals.Sender#sendProducerData
+
+org.apache.kafka.clients.producer.internals.RecordAccumulator#drain
+
+org.apache.kafka.clients.producer.internals.RecordAccumulator#drainBatchesForOneNode
+
+```scala
+private List<ProducerBatch> drainBatchesForOneNode(Cluster cluster, Node node, int maxSize, long now) {
+    int size = 0;
+    List<PartitionInfo> parts = cluster.partitionsForNode(node.id());
+    List<ProducerBatch> ready = new ArrayList<>();
+    /* to make starvation less likely this loop doesn't start at 0 */
+    int start = drainIndex = drainIndex % parts.size();
+    do {
+        PartitionInfo part = parts.get(drainIndex);
+        TopicPartition tp = new TopicPartition(part.topic(), part.partition());
+        this.drainIndex = (this.drainIndex + 1) % parts.size();
+
+        // Only proceed if the partition has no in-flight batches.
+        if (isMuted(tp, now))
+            continue;
+
+        Deque<ProducerBatch> deque = getDeque(tp);
+        if (deque == null)
+            continue;
+
+        synchronized (deque) {
+            // invariant: !isMuted(tp,now) && deque != null
+            ProducerBatch first = deque.peekFirst();
+            if (first == null)
+                continue;
+
+            // first != null
+            boolean backoff = first.attempts() > 0 && first.waitedTimeMs(now) < retryBackoffMs;
+            // Only drain the batch if it is not during backoff period.
+            if (backoff)
+                continue;
+
+            if (size + first.estimatedSizeInBytes() > maxSize && !ready.isEmpty()) {
+                // there is a rare case that a single batch size is larger than the request size due to
+                // compression; in this case we will still eventually send this batch in a single request
+                break;
+            } else {
+                if (shouldStopDrainBatchesForPartition(first, tp))
+                    break;
+
+                boolean isTransactional = transactionManager != null && transactionManager.isTransactional();
+                ProducerIdAndEpoch producerIdAndEpoch =
+                    transactionManager != null ? transactionManager.producerIdAndEpoch() : null;
+                ProducerBatch batch = deque.pollFirst();
+                if (producerIdAndEpoch != null && !batch.hasSequence()) {
+                    // If the batch already has an assigned sequence, then we should not change the producer id and
+                    // sequence number, since this may introduce duplicates. In particular, the previous attempt
+                    // may actually have been accepted, and if we change the producer id and sequence here, this
+                    // attempt will also be accepted, causing a duplicate.
+                    //
+                    // Additionally, we update the next sequence number bound for the partition, and also have
+                    // the transaction manager track the batch so as to ensure that sequence ordering is maintained
+                    // even if we receive out of order responses.
+                    batch.setProducerState(producerIdAndEpoch, transactionManager.sequenceNumber(batch.topicPartition), isTransactional);
+                    transactionManager.incrementSequenceNumber(batch.topicPartition, batch.recordCount);
+                    log.debug("Assigned producerId {} and producerEpoch {} to batch with base sequence " +
+                            "{} being sent to partition {}", producerIdAndEpoch.producerId,
+                        producerIdAndEpoch.epoch, batch.baseSequence(), tp);
+
+                    transactionManager.addInFlightBatch(batch);
+                }
+                batch.close();
+                size += batch.records().sizeInBytes();
+                ready.add(batch);
+
+                batch.drained(now);
+            }
+        }
+    } while (start != drainIndex);
+    return ready;
+}
+```
 
 
-### 事务机制
+
+## 消息场景分解
+
+列此篇章的目的在于希望能够通过分析一些常用的收发包业务场景来剖析kafka，这里会从client和broker等视角做分析。
+
+### InitProducerIdRequest
+
+#### client
+
+org.apache.kafka.clients.producer.internals.Sender#run
+
+org.apache.kafka.clients.producer.internals.Sender#runOnce
+
+org.apache.kafka.clients.producer.internals.TransactionManager#bumpIdempotentEpochAndResetIdIfNeeded
+
+```java
+void runOnce() {
+  	// 事务管理器不为空有两种情况：一种幂等性，一种事务
+    if (transactionManager != null) {
+        try {
+            transactionManager.maybeResolveSequences();
+
+            // do not continue sending if the transaction manager is in a failed state
+            if (transactionManager.hasFatalError()) {
+                RuntimeException lastError = transactionManager.lastError();
+                if (lastError != null)
+                    maybeAbortBatches(lastError);
+                client.poll(retryBackoffMs, time.milliseconds());
+                return;
+            }
+
+            // Check whether we need a new producerId. If so, we will enqueue an InitProducerId
+            // request which will be sent below
+          	// 非事务情况下，这里我们发送一个InitProducerIdRequest
+            transactionManager.bumpIdempotentEpochAndResetIdIfNeeded();
+
+            if (maybeSendAndPollTransactionalRequest()) {
+                return;
+            }
+        } catch (AuthenticationException e) {
+            // This is already logged as error, but propagated here to perform any clean ups.
+            log.trace("Authentication exception while processing transactional request", e);
+            transactionManager.authenticationFailed(e);
+        }
+    }
+
+    long currentTimeMs = time.milliseconds();
+  	// 发送request核心流程
+    long pollTimeout = sendProducerData(currentTimeMs);
+    client.poll(pollTimeout, currentTimeMs);
+}
+```
+
+
+
+#### broker
+
+客户端在生产数据的时候发现自己
+
+kafka.server.KafkaApis#handleInitProducerIdRequest
+
+```scala
+def handleInitProducerId(transactionalId: String,
+                         transactionTimeoutMs: Int,
+                         expectedProducerIdAndEpoch: Option[ProducerIdAndEpoch],
+                         responseCallback: InitProducerIdCallback): Unit = {
+
+  // 这里是幂等性的情况，幂等性时不需要写事务日志
+  if (transactionalId == null) {
+    // if the transactional id is null, then always blindly accept the request
+    // and return a new producerId from the producerId manager
+    val producerId = producerIdManager.generateProducerId()
+    responseCallback(InitProducerIdResult(producerId, producerEpoch = 0, Errors.NONE))
+  } else if (transactionalId.isEmpty) {
+    // if transactional id is empty then return error as invalid request. This is
+    // to make TransactionCoordinator's behavior consistent with producer client
+    responseCallback(initTransactionError(Errors.INVALID_REQUEST))
+  } else if (!txnManager.validateTransactionTimeoutMs(transactionTimeoutMs)) {
+    // check transactionTimeoutMs is not larger than the broker configured maximum allowed value
+    responseCallback(initTransactionError(Errors.INVALID_TRANSACTION_TIMEOUT))
+  } else {
+    // 这里是客户端开启事务的流程
+    val coordinatorEpochAndMetadata = txnManager.getTransactionState(transactionalId).right.flatMap {
+      case None =>
+        val producerId = producerIdManager.generateProducerId()
+        val createdMetadata = new TransactionMetadata(transactionalId = transactionalId,
+          producerId = producerId,
+          lastProducerId = RecordBatch.NO_PRODUCER_ID,
+          producerEpoch = RecordBatch.NO_PRODUCER_EPOCH,
+          lastProducerEpoch = RecordBatch.NO_PRODUCER_EPOCH,
+          txnTimeoutMs = transactionTimeoutMs,
+          state = Empty,
+          topicPartitions = collection.mutable.Set.empty[TopicPartition],
+          txnLastUpdateTimestamp = time.milliseconds())
+        txnManager.putTransactionStateIfNotExists(createdMetadata)
+
+      case Some(epochAndTxnMetadata) => Right(epochAndTxnMetadata)
+    }
+
+    val result: ApiResult[(Int, TxnTransitMetadata)] = coordinatorEpochAndMetadata.right.flatMap {
+      existingEpochAndMetadata =>
+        val coordinatorEpoch = existingEpochAndMetadata.coordinatorEpoch
+        val txnMetadata = existingEpochAndMetadata.transactionMetadata
+
+        txnMetadata.inLock {
+          prepareInitProducerIdTransit(transactionalId, transactionTimeoutMs, coordinatorEpoch, txnMetadata,
+            expectedProducerIdAndEpoch)
+        }
+    }
+
+    result match {
+      case Left(error) =>
+        responseCallback(initTransactionError(error))
+
+      case Right((coordinatorEpoch, newMetadata)) =>
+        if (newMetadata.txnState == PrepareEpochFence) {
+          // abort the ongoing transaction and then return CONCURRENT_TRANSACTIONS to let client wait and retry
+          def sendRetriableErrorCallback(error: Errors): Unit = {
+            if (error != Errors.NONE) {
+              responseCallback(initTransactionError(error))
+            } else {
+              responseCallback(initTransactionError(Errors.CONCURRENT_TRANSACTIONS))
+            }
+          }
+
+          handleEndTransaction(transactionalId,
+            newMetadata.producerId,
+            newMetadata.producerEpoch,
+            TransactionResult.ABORT,
+            sendRetriableErrorCallback)
+        } else {
+          def sendPidResponseCallback(error: Errors): Unit = {
+            if (error == Errors.NONE) {
+              info(s"Initialized transactionalId $transactionalId with producerId ${newMetadata.producerId} and producer " +
+                s"epoch ${newMetadata.producerEpoch} on partition " +
+                s"${Topic.TRANSACTION_STATE_TOPIC_NAME}-${txnManager.partitionFor(transactionalId)}")
+              responseCallback(initTransactionMetadata(newMetadata))
+            } else {
+              info(s"Returning $error error code to client for $transactionalId's InitProducerId request")
+              responseCallback(initTransactionError(error))
+            }
+          }
+
+          txnManager.appendTransactionToLog(transactionalId, coordinatorEpoch, newMetadata, sendPidResponseCallback)
+        }
+    }
+  }
+}
+```
+
+### ProduceRequest
+
+
+
+#### client
+
+
+
+#### broker
+
+
+
+
+
+kafka.server.KafkaApis#handleProduceRequest
+
+kafka.server.ReplicaManager#appendRecords
+
+kafka.server.ReplicaManager#appendToLocalLog
+
+kafka.cluster.Partition#appendRecordsToLeader
+
+kafka.log.Log#append
+
+
+
+追加record到partion的leader
+
+```scala
+def appendRecordsToLeader(records: MemoryRecords, origin: AppendOrigin, requiredAcks: Int): LogAppendInfo = {
+  val (info, leaderHWIncremented) = inReadLock(leaderIsrUpdateLock) {
+    leaderLogIfLocal match {
+      case Some(leaderLog) =>
+        val minIsr = leaderLog.config.minInSyncReplicas
+        val inSyncSize = inSyncReplicaIds.size
+
+        // Avoid writing to leader if there are not enough insync replicas to make it safe
+        if (inSyncSize < minIsr && requiredAcks == -1) {
+          throw new NotEnoughReplicasException(s"The size of the current ISR $inSyncReplicaIds " +
+            s"is insufficient to satisfy the min.isr requirement of $minIsr for partition $topicPartition")
+        }
+
+      	// 调用Log的appendAsLeader方法
+        val info = leaderLog.appendAsLeader(records, leaderEpoch = this.leaderEpoch, origin,
+          interBrokerProtocolVersion)
+
+        // we may need to increment high watermark since ISR could be down to 1
+        (info, maybeIncrementLeaderHW(leaderLog))
+
+      case None =>
+        throw new NotLeaderForPartitionException("Leader not local for partition %s on broker %d"
+          .format(topicPartition, localBrokerId))
+    }
+  }
+
+  // some delayed operations may be unblocked after HW changed
+  if (leaderHWIncremented)
+    tryCompleteDelayedRequests()
+  else {
+    // probably unblock some follower fetch requests since log end offset has been updated
+    delayedOperations.checkAndCompleteFetch()
+  }
+
+  info
+}
+```
+
+
+
+Log#append详解。主要步骤如下：
+
+(1)
+
+(2)
+
+(3)
+
+```java
+private def append(records: MemoryRecords,
+                   origin: AppendOrigin,    // client or Coordinator
+                   interBrokerProtocolVersion: ApiVersion,
+                   assignOffsets: Boolean,	// 是否更新offset，当前节点是leader时为true
+                   leaderEpoch: Int): LogAppendInfo = {
+  maybeHandleIOException(s"Error while appending records to $topicPartition in dir ${dir.getParent}") {
+    // 校验消息的有效性：比如单调性、版本、大小等
+    val appendInfo = analyzeAndValidateRecords(records, origin)
+
+    // 有效的record个数
+    if (appendInfo.shallowCount == 0)
+      return appendInfo
+
+    // trim any invalid bytes or partial messages before appending it to the on-disk log
+    var validRecords = trimInvalidBytes(records, appendInfo)
+
+    // 这里对临界资源Log使用互斥锁：考虑事务和非事务的写场景，都可以写数据，只不过事务场景下维护了事务日志，
+    // 在消费者消费时可以根据偏移值来过滤无效消息
+    lock synchronized {
+      checkIfMemoryMappedBufferClosed()
+        
+      // a.是否对对消息集合使用nextOffset和epoch信息  
+      if (assignOffsets) {
+        // assign offsets to the message set
+        val offset = new LongRef(nextOffsetMetadata.messageOffset)
+        appendInfo.firstOffset = Some(offset.value)
+        val now = time.milliseconds
+        val validateAndOffsetAssignResult = try {
+          LogValidator.validateMessagesAndAssignOffsets(validRecords,
+            topicPartition,
+            offset,
+            time,
+            now,
+            appendInfo.sourceCodec,
+            appendInfo.targetCodec,
+            config.compact,
+            config.messageFormatVersion.recordVersion.value,
+            config.messageTimestampType,
+            config.messageTimestampDifferenceMaxMs,
+            leaderEpoch,
+            origin,
+            interBrokerProtocolVersion,
+            brokerTopicStats)
+        } catch {
+          case e: IOException =>
+            throw new KafkaException(s"Error validating messages while appending to log $name", e)
+        }
+        validRecords = validateAndOffsetAssignResult.validatedRecords
+        appendInfo.maxTimestamp = validateAndOffsetAssignResult.maxTimestamp
+        appendInfo.offsetOfMaxTimestamp = validateAndOffsetAssignResult.shallowOffsetOfMaxTimestamp
+        appendInfo.lastOffset = offset.value - 1
+        appendInfo.recordConversionStats = validateAndOffsetAssignResult.recordConversionStats
+        if (config.messageTimestampType == TimestampType.LOG_APPEND_TIME)
+          appendInfo.logAppendTime = now
+
+        // re-validate message sizes if there's a possibility that they have changed (due to re-compression or message
+        // format conversion)
+        if (validateAndOffsetAssignResult.messageSizeMaybeChanged) {
+          for (batch <- validRecords.batches.asScala) {
+            if (batch.sizeInBytes > config.maxMessageSize) {
+              // we record the original message set size instead of the trimmed size
+              // to be consistent with pre-compression bytesRejectedRate recording
+              brokerTopicStats.topicStats(topicPartition.topic).bytesRejectedRate.mark(records.sizeInBytes)
+              brokerTopicStats.allTopicsStats.bytesRejectedRate.mark(records.sizeInBytes)
+              throw new RecordTooLargeException(s"Message batch size is ${batch.sizeInBytes} bytes in append to" +
+                s"partition $topicPartition which exceeds the maximum configured size of ${config.maxMessageSize}.")
+            }
+          }
+        }
+      } else {
+        // we are taking the offsets we are given
+        if (!appendInfo.offsetsMonotonic)
+          throw new OffsetsOutOfOrderException(s"Out of order offsets found in append to $topicPartition: " +
+                                               records.records.asScala.map(_.offset))
+
+        if (appendInfo.firstOrLastOffsetOfFirstBatch < nextOffsetMetadata.messageOffset) {
+          // we may still be able to recover if the log is empty
+          // one example: fetching from log start offset on the leader which is not batch aligned,
+          // which may happen as a result of AdminClient#deleteRecords()
+          val firstOffset = appendInfo.firstOffset match {
+            case Some(offset) => offset
+            case None => records.batches.asScala.head.baseOffset()
+          }
+
+          val firstOrLast = if (appendInfo.firstOffset.isDefined) "First offset" else "Last offset of the first batch"
+          throw new UnexpectedAppendOffsetException(
+            s"Unexpected offset in append to $topicPartition. $firstOrLast " +
+            s"${appendInfo.firstOrLastOffsetOfFirstBatch} is less than the next offset ${nextOffsetMetadata.messageOffset}. " +
+            s"First 10 offsets in append: ${records.records.asScala.take(10).map(_.offset)}, last offset in" +
+            s" append: ${appendInfo.lastOffset}. Log start offset = $logStartOffset",
+            firstOffset, appendInfo.lastOffset)
+        }
+      }
+
+      // 更新epoche信息
+      validRecords.batches.asScala.foreach { batch =>
+        if (batch.magic >= RecordBatch.MAGIC_VALUE_V2) {
+          maybeAssignEpochStartOffset(batch.partitionLeaderEpoch, batch.baseOffset)
+        } else {
+          // In partial upgrade scenarios, we may get a temporary regression to the message format. In
+          // order to ensure the safety of leader election, we clear the epoch cache so that we revert
+          // to truncation by high watermark after the next leader election.
+          leaderEpochCache.filter(_.nonEmpty).foreach { cache =>
+            warn(s"Clearing leader epoch cache after unexpected append with message format v${batch.magic}")
+            cache.clearAndFlush()
+          }
+        }
+      }
+
+      // check messages set size may be exceed config.segmentSize
+      // 消息集合的大小不能大于段大小
+      if (validRecords.sizeInBytes > config.segmentSize) {
+        throw new RecordBatchTooLargeException(s"Message batch size is ${validRecords.sizeInBytes} bytes in append " +
+          s"to partition $topicPartition, which exceeds the maximum configured segment size of ${config.segmentSize}.")
+      }
+
+      // maybe roll the log if this segment is full
+      val segment = maybeRoll(validRecords.sizeInBytes, appendInfo)
+
+      val logOffsetMetadata = LogOffsetMetadata(
+        messageOffset = appendInfo.firstOrLastOffsetOfFirstBatch,
+        segmentBaseOffset = segment.baseOffset,
+        relativePositionInSegment = segment.size)
+
+      // now that we have valid records, offsets assigned, and timestamps updated, we need to
+      // validate the idempotent/transactional state of the producers and collect some metadata
+      // 从record中收集事务和幂等性（seq/epoch/pid等）到producerStateManager中
+      // Maintains a mapping from ProducerIds to metadata about the last appended entries: 
+      // epoch, sequence number, last offset, etc.)
+      val (updatedProducers, completedTxns, maybeDuplicate) = analyzeAndValidateProducerState(
+        logOffsetMetadata, validRecords, origin)
+
+      maybeDuplicate.foreach { duplicate =>
+        appendInfo.firstOffset = Some(duplicate.firstOffset)
+        appendInfo.lastOffset = duplicate.lastOffset
+        appendInfo.logAppendTime = duplicate.timestamp
+        appendInfo.logStartOffset = logStartOffset
+        return appendInfo
+      }
+			// 写timeindex和log文件
+      segment.append(largestOffset = appendInfo.lastOffset,
+        largestTimestamp = appendInfo.maxTimestamp,
+        shallowOffsetOfMaxTimestamp = appendInfo.offsetOfMaxTimestamp,
+        records = validRecords)
+
+      // Increment the log end offset. We do this immediately after the append because a
+      // write to the transaction index below may fail and we want to ensure that the offsets
+      // of future appends still grow monotonically. The resulting transaction index inconsistency
+      // will be cleaned up after the log directory is recovered. Note that the end offset of the
+      // ProducerStateManager will not be updated and the last stable offset will not advance
+      // if the append to the transaction index fails.
+      updateLogEndOffset(appendInfo.lastOffset + 1)
+
+      // update the producer state
+      for (producerAppendInfo <- updatedProducers.values) {
+        producerStateManager.update(producerAppendInfo)
+      }
+
+      // update the transaction index with the true last stable offset. The last offset visible
+      // to consumers using READ_COMMITTED will be limited by this value and the high watermark.
+      for (completedTxn <- completedTxns) {
+        val lastStableOffset = producerStateManager.lastStableOffset(completedTxn)
+        // 更新事务日志，用于对参与事务的消费者定义消息可见范围
+        segment.updateTxnIndex(completedTxn, lastStableOffset)
+        producerStateManager.completeTxn(completedTxn)
+      }
+
+      // always update the last producer id map offset so that the snapshot reflects the current offset
+      // even if there isn't any idempotent data being written
+      producerStateManager.updateMapEndOffset(appendInfo.lastOffset + 1)
+
+      // update the first unstable offset (which is used to compute LSO)
+      maybeIncrementFirstUnstableOffset()
+
+      trace(s"Appended message set with last offset: ${appendInfo.lastOffset}, " +
+        s"first offset: ${appendInfo.firstOffset}, " +
+        s"next offset: ${nextOffsetMetadata.messageOffset}, " +
+        s"and messages: $validRecords")
+
+      // 将以上写入到文件进行flush操作
+      if (unflushedMessages >= config.flushInterval)
+        flush()
+
+      appendInfo
+    }
+  }
+}
+```
+
+
+
+## 事务机制
+
+![Kafka Transactions Data Flow](images/Kafka Transactions Data Flow.png)
+
+**Kafka的事务机制是通过写日志的方式实现的，事务操作的单元是leaderParitition，采用synchronized锁保护临界区。**
+
+**事务状态在内存中有缓存，采用读写锁的方式保护，写入日志成功后回调更新内存中事务的缓存信息；**
+
+**写入日志成功后会更新HW，HW更新是所有分区副本（必须是ISR或者允许lag范围内的）中LEO的最小值。**
+
+#### 客户端流程
+
+##### 步骤1-发起事务
+
+调用方法为initializeTransactions，具体步骤如下：
+
+1) 切换本地事务状态由UNINITIALIZED->INITIALIZING
+
+2) 发送InitProducerIdRequest请求，使用闭锁方式同步等待结果，获取PID和epoch
+
+```java
+// InitProducerIdRequestData
+new Schema(
+  new Field("transactional_id", Type.NULLABLE_STRING, "The transactional id, or null if the producer is not transactional."),
+  new Field("transaction_timeout_ms", Type.INT32, "The time in ms to wait for before aborting idle transactions sent by this producer.")
+);
+// InitProducerIdResponseData
+new Schema(
+  new Field("throttle_time_ms", Type.INT32, "The duration in milliseconds for which the request was throttled due to a quota violation, or zero if the request did not violate any quota."),
+  new Field("error_code", Type.INT16, "The error code, or 0 if there was no error."),
+  new Field("producer_id", Type.INT64, "The current producer id."),
+  new Field("producer_epoch", Type.INT16, "The current epoch associated with the producer id.")
+);
+```
+
+3) 处理请求InitPidRequest返回结果：第一次发起请求服务端会报NOT_COORDINATOR错，这个时候客户端发起FindCoordinatorRequest请求，异步返回协调者的地址信息
+
+```java
+// 查找协调器请求
+new Schema(
+	new Field("key", Type.STRING, "The coordinator key: 这里指的是生产者事务ID或者消费者组ID"),
+	new Field("key_type", Type.INT8, "The coordinator key type.  (Group, transaction, etc.)")
+);
+
+// 协调器请求结果
+new Schema(
+  new Field("throttle_time_ms", Type.INT32, "The duration in milliseconds for which the request was throttled due to a quota violation, or zero if the request did not violate any quota."),
+  new Field("error_code", Type.INT16, "The error code, or 0 if there was no error."),
+  new Field("error_message", Type.NULLABLE_STRING, "The error message, or null if there was no error."),
+  new Field("node_id", Type.INT32, "The node id."),
+  new Field("host", Type.STRING, "The host name."),
+  new Field("port", Type.INT32, "The port.")
+);
+```
+
+InitPidRequest会返回producerId和epoch（注意这里的epoch应该是leader partition的epoch）
+
+##### 步骤2-开启事务
+
+org.apache.kafka.clients.producer.internals.TransactionManager#beginTransaction
+
+a）将客户端状态由INITIALIZING->IN_TRANSACTION 
+
+这个时候服务端并未开始事务，只有生产者发送一条数据到服务端才开始
+
+##### 步骤3-发送数据
+
+发送数据时会生成MemoryRecords，此记录会标明是否为事务数据。
+
+在org.apache.kafka.clients.producer.KafkaProducer#doSend的发送流程中会将事务消息加入到 newPartitionsInTransaction Set集合中。
+
+这样在实际发送消息时，Sender线程会发送AddPartitionsToTxnRequest事务请求，也就是说至于发送数据时kafka才会将要发往的分区信息提取出来然后发送到事务协调器加入到事务中。
+
+1) org.apache.kafka.clients.producer.internals.Sender#runOnce
+
+2) org.apache.kafka.clients.producer.internals.Sender#maybeSendAndPollTransactionalRequest
+
+发送AddOffsetCommitsToTxnRequest：
+
+如果消费者也参与到事务中，会批量的将所涉及到的消费者分区offset写到__consumer_offsets Topic的事务中。采用取模的方式获取内部topic的leader partition。
+
+##### 步骤4-提交事务
+
+
+
+提交事务到
+
+
+
+事务协调者会查找涉及到事务所有Partition的leader节点并发送事务结束消息
+
+```java
+WriteTxnMarkersRequest
+```
+
+
+
+##### 步骤5-回滚事务
+
+
+
+org.apache.kafka.clients.producer.internals.TransactionManager#beginCommit
+
+org.apache.kafka.clients.producer.internals.TransactionManager#beginCompletingTransaction
+
+org.apache.kafka.clients.producer.internals.TransactionManager#enqueueRequest
+
+org.apache.kafka.clients.producer.internals.TransactionManager.FindCoordinatorHandler#handleResponse
+
+
+
+```java
+// 结束事务的请求格式
+new Schema(
+  new Field("transactional_id", Type.STRING, "The ID of the transaction to end."),
+  new Field("producer_id", Type.INT64, "The producer ID."),
+  new Field("producer_epoch", Type.INT16, "The current epoch associated with the producer."),
+  new Field("committed", Type.BOOLEAN, "True if the transaction was committed, false if it was aborted.")
+);
+```
+
+发送EndTxnRequest结束事务
+
+
+
+#### 服务端流程
+
+服务端收到FIND_COORDINATOR会在topic __transaction_state的所有分区中分配分区Id给此事务：
+
+分区分配策略如下：
+
+```java
+def partitionFor(transactionalId: String): Int = Utils.abs(transactionalId.hashCode) % transactionTopicPartitionCount
+```
+
+然后找到此分区的leader信息返回给客户端。
+
+服务端收到handleInitProducerIdRequest请求后，解析流程如下：
+
+解析请求，生成producerId并把事务状态、事务的topicPartition信息写入到事务日志中。写到日志中的数据主要为：
+
+```java
+// value:参与到该事务的topic、事务状态和分区信息
+private object ValueSchema {
+  private val ProducerIdKey = "producer_id"
+    private val ProducerEpochKey = "producer_epoch"
+    private val TxnTimeoutKey = "transaction_timeout"
+    private val TxnStatusKey = "transaction_status"
+    private val TxnPartitionsKey = "transaction_partitions"
+    private val TxnEntryTimestampKey = "transaction_entry_timestamp"
+    private val TxnStartTimestampKey = "transaction_start_timestamp"
+
+    private val PartitionIdsKey = "partition_ids"
+    private val TopicKey = "topic"
+}
+
+// key
+private object KeySchema {
+  private val TXN_ID_KEY = "transactional_id"
+
+}      
+public SimpleRecord(long timestamp, ByteBuffer key, ByteBuffer value) {
+  this(timestamp, key, value, Record.EMPTY_HEADERS);
+}
+
+// 事务中的内容，有value和key，value和key的模型见上，需要将其序列化成字节数组写到日志文件中
+public SimpleRecord(long timestamp, byte[] key, byte[] value) {
+  this(timestamp, Utils.wrapNullable(key), Utils.wrapNullable(value));
+}
+
+val topicPartition = new TopicPartition(Topic.TRANSACTION_STATE_TOPIC_NAME, partitionFor(transactionalId))
+// 事务中所有的元数据，key为事务topic的名称和分配给此topic的分区Id,value为事务具体元数据
+val recordsPerPartition = Map(topicPartition -> records)
+```
+
+
 
 
 
@@ -1241,11 +1925,29 @@ public long readFrom(ScatteringByteChannel channel) throws IOException {
 
 
 
-## Kafka服务端
+## Broker
+
+### 常用配置文件
+
+
+
+| 配置项         | 参数及含义                 | 描述 |
+| -------------- | -------------------------- | ---- |
+| broker.id      | broker的唯一标识，整数类型 |      |
+| log.dirs       | 日志文件的存储位置         |      |
+| num.partitions | 每个topic的分区个数        |      |
 
 
 
 ### 启动流程
+
+代码流程如下：
+
+1) kafka.Kafka#main
+
+2) kafka.server.KafkaServerStartable#startup
+
+3) kafka.server.KafkaServer#startup
 
 Kafka server端的启动流程主要逻辑在KafkaServer.scala类中。
 
@@ -1571,7 +2273,180 @@ private KafkaConsumer(ConsumerConfig config,
 }
 ```
 
+## 副本机制
 
+
+
+### 写日志流程
+
+kafka本地日志流程：常见的写日志场景包括以下几种：
+
+kafka.server.KafkaApis#handleProduceRequest	// 生产者发送数据写日志
+
+kafka.coordinator.group.GroupMetadataManager#appendForGroup  // 消费者组提交内部topic
+
+kafka.coordinator.transaction.TransactionStateManager#appendTransactionToLog  // 事务日志
+
+以上三种场景底层流程如下：
+
+写日志通用流程如下：
+
+1) kafka.server.ReplicaManager#appendRecords
+
+2) kafka.server.ReplicaManager#appendToLocalLog
+
+3) kafka.cluster.Partition#appendRecordsToLeader
+
+4.1) kafka.log.Log#appendAsLeader
+
+4.2) kafka.cluster.Partition#maybeIncrementLeaderHW
+
+### Log
+
+```markdown
+*关于设计*
+Log日志对应于某个topic的partition，负责记录partition的日志信息，有以下重要的字段信息
+
+	// 1. 表示追加消息到log中的偏移值
+	@volatile private var nextOffsetMetadata: LogOffsetMetadata = _
+
+  @volatile private var firstUnstableOffsetMetadata: Option[LogOffsetMetadata] = None
+
+	// 2.高水位信息
+  @volatile private var highWatermarkMetadata: LogOffsetMetadata = LogOffsetMetadata(logStartOffset)
+
+	// 3.segmentlog由segment组成
+  private val segments: ConcurrentNavigableMap[java.lang.Long, LogSegment] = new ConcurrentSkipListMap[java.lang.Long, LogSegment]
+
+  // 分区的leader信息：epoch和offset
+  @volatile var leaderEpochCache: Option[LeaderEpochFileCache] = None
+
+```
+
+kafka.server.KafkaApis#handleLeaderAndIsrRequest
+
+kafka.server.ReplicaManager#becomeLeaderOrFollower
+
+kafka.cluster.Partition#createLogIfNotExists
+
+kafka.log.LogManager#getOrCreateLog
+
+以下是getOrCreateLog中的部分代码，其中Log的初始化代码片段如下：
+
+```scala
+// log文件名：s"${topicPartition.topic}-${topicPartition.partition}"
+val logDirName = {
+  if (isFuture)
+    Log.logFutureDirName(topicPartition)
+  else
+    Log.logDirName(topicPartition)
+}
+
+// 创建log文件
+val logDir = logDirs
+  .toStream // to prevent actually mapping the whole list, lazy map
+  .map(createLogDirectory(_, logDirName))
+  .find(_.isSuccess)
+  .getOrElse(Failure(new KafkaStorageException("No log directories available. Tried " + logDirs.map(_.getAbsolutePath).mkString(", "))))
+  .get // If Failure, will throw
+
+/**
+ * An append-only log for storing messages.
+ *
+ * The log is a sequence of LogSegments, each with a base offset denoting the first message in the segment.
+ *
+ * New log segments are created according to a configurable policy that controls the size in bytes or time interval
+ * for a given segment.
+ *
+ * @param dir The directory in which log segments are created.
+ * @param config The log configuration settings
+ * @param logStartOffset The earliest offset allowed to be exposed to kafka client.
+ *                       The logStartOffset can be updated by :
+ *                       - user's DeleteRecordsRequest
+ *                       - broker's log retention
+ *                       - broker's log truncation
+ *                       The logStartOffset is used to decide the following:
+ *                       - Log deletion. LogSegment whose nextOffset <= log's logStartOffset can be deleted.
+ *                         It may trigger log rolling if the active segment is deleted.
+ *                       - Earliest offset of the log in response to ListOffsetRequest. To avoid OffsetOutOfRange exception after user seeks to earliest offset,
+ *                         we make sure that logStartOffset <= log's highWatermark
+ *                       Other activities such as log cleaning are not affected by logStartOffset.
+ * @param recoveryPoint The offset at which to begin recovery--i.e. the first offset which has not been flushed to disk
+ * @param scheduler The thread pool scheduler used for background actions
+ * @param brokerTopicStats Container for Broker Topic Yammer Metrics
+ * @param time The time instance used for checking the clock
+ * @param maxProducerIdExpirationMs The maximum amount of time to wait before a producer id is considered expired
+ * @param producerIdExpirationCheckIntervalMs How often to check for producer ids which need to be expired
+ */
+// 初始化log
+val log = Log(
+  dir = logDir,  // log文件名
+  config = config, // log的配置，包括segment等
+  logStartOffset = 0L, // 
+  recoveryPoint = 0L,
+  maxProducerIdExpirationMs = maxPidExpirationMs,  // 事务的失效时间
+  producerIdExpirationCheckIntervalMs = LogManager.ProducerIdExpirationCheckIntervalMs,
+  scheduler = scheduler,
+  time = time,
+  brokerTopicStats = brokerTopicStats,
+  logDirFailureChannel = logDirFailureChannel)
+
+// 最后将其放到缓存中
+if (isFuture)
+	futureLogs.put(topicPartition, log)
+else
+	currentLogs.put(topicPartition, log)
+
+
+```
+
+在Log实例化过程中，会进行静态初始化操作，locally类似于java中的static
+
+```scala
+locally {
+  val startMs = time.milliseconds
+
+  // create the log directory if it doesn't exist
+  Files.createDirectories(dir.toPath)
+	// 初始化leader-epoch-checkpoint文件:checkpoint文件会定时触发更新
+  // checkpoint文件记录的是当前leader的epoch及对应的log offset（这里的offset指的是log end offset）
+  // LeaderEpoch => Offsets的元数据信息
+  initializeLeaderEpochCache()
+
+  // 注意这里返回的是activeSegment的结尾偏移值，也就是下一次追加消息的偏移值
+  val nextOffset = loadSegments()
+
+  /* Calculate the offset of the next message */
+  // 将当前segment的追加消息的offset、baseOffset和segment的大小组成元数据
+  nextOffsetMetadata = LogOffsetMetadata(nextOffset, activeSegment.baseOffset, activeSegment.size)
+
+  leaderEpochCache.foreach(_.truncateFromEnd(nextOffsetMetadata.messageOffset))
+
+  updateLogStartOffset(math.max(logStartOffset, segments.firstEntry.getValue.baseOffset))
+
+  // The earliest leader epoch may not be flushed during a hard failure. Recover it here.
+  leaderEpochCache.foreach(_.truncateFromStart(logStartOffset))
+
+  // Any segment loading or recovery code must not use producerStateManager, so that we can build the full state here
+  // from scratch.
+  if (!producerStateManager.isEmpty)
+    throw new IllegalStateException("Producer state must be empty during log initialization")
+  loadProducerState(logEndOffset, reloadFromCleanShutdown = hasCleanShutdownFile)
+
+  info(s"Completed load of log with ${segments.size} segments, log start offset $logStartOffset and " +
+    s"log end offset $logEndOffset in ${time.milliseconds() - startMs} ms")
+}
+```
+
+
+
+## Controller
+
+controller代码是kafka的非常重要的代码，需要我们深入学习。从某种意义上来说，它是kafka最核心的组件，一方面，他要为集群中的所有主题分区选取领导者副本；另一方面，它还承载着集群的全部元数据信息，并负责讲这些元数据信息同步到其他broker上。下面我们来一一讲解controller组件。
+
+参考：
+
+https://www.cnblogs.com/boanxin/p/13618431.html
 
 ## 工具类
 

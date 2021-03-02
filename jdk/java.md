@@ -519,11 +519,110 @@ private void enqueue(Node<E> node) {
 
 #### DelayQueue
 
+应用场景：
 
+　1. 淘宝订单业务:下单之后如果三十分钟之内没有付款就自动取消订单。 
+　2. 饿了吗订餐通知:下单成功后60s之后给用户发送短信通知。
+
+　3.关闭空闲连接。服务器中，有很多客户端的连接，空闲一段时间之后需要关闭之。
+
+　4.缓存。缓存中的对象，超过了空闲时间，需要从缓存中移出。
+
+　5.任务超时处理。在网络协议滑动窗口请求应答式交互时，处理超时未响应的请求等。
+
+前提：
+
+使用延时队列必须实现延时接口，定义延时时间
+
+```java
+public interface Delayed extends Comparable<Delayed> {
+
+    /**
+     * Returns the remaining delay associated with this object, in the
+     * given time unit.
+     *
+     * @param unit the time unit
+     * @return the remaining delay; zero or negative values indicate
+     * that the delay has already elapsed
+     */
+    long getDelay(TimeUnit unit);
+}
+```
+
+put->offer
+
+```java
+public boolean offer(E e) {
+    final ReentrantLock lock = this.lock;
+    lock.lock();
+    try {
+      	// 直接插入元素
+        q.offer(e);
+      	// 对于take比put早的场景，需要通知等待线程，数据可得
+        if (q.peek() == e) {
+            leader = null;
+          	// 如果AQS的条件队列中有等待者会将所有的等待者加入到CLH队列中去
+            available.signal();
+        }
+        return true;
+    } finally {
+        lock.unlock();
+    }
+}
+```
+
+
+
+take操作
+
+
+
+```java
+public E take() throws InterruptedException {
+    final ReentrantLock lock = this.lock;
+    lock.lockInterruptibly();
+    try {
+        for (;;) {
+            E first = q.peek();
+          	// 如果队列中没有数据则等待
+            if (first == null)
+                available.await();
+            else {
+              	// 获取延时时间
+                long delay = first.getDelay(NANOSECONDS);
+                if (delay <= 0)
+                    return q.poll();
+                first = null; // don't retain ref while waiting
+                if (leader != null)
+                    available.await();
+                else {
+                    Thread thisThread = Thread.currentThread();
+                    leader = thisThread;
+                    try {
+                      	// 条件队列等待指定时间
+                        // await操作，将其加入到条件队列中去，如果此节点还没有在CLH队列中则park
+                  			// 注意此过程会释放锁，并在被唤醒时重新获取队列
+                        available.awaitNanos(delay);
+                    } finally {
+                        if (leader == thisThread)
+                            leader = null;
+                    }
+                }
+            }
+        }
+    } finally {
+        if (leader == null && q.peek() != null)
+            available.signal();
+        lock.unlock();
+    }
+}
+```
 
 
 
 #### LinkedTransferQueue
+
+
 
 #### SynchronousQueue
 
@@ -690,6 +789,77 @@ public PriorityQueue(int initialCapacity,
 
 
 ## Map
+
+### TreeMap
+
+treeMap可以根据key必须实现Comparator接口，否则在初始化时会报错。
+
+treeMap的key不能为空；
+
+treeMap默认是小顶堆实现，由comparator接口实现是小顶堆还是大顶堆。
+
+如果key为Integer则升序，String 则为字母表
+
+```java
+public class TreeMap<K,V>
+    extends AbstractMap<K,V>
+    implements NavigableMap<K,V>, Cloneable, java.io.Serializable
+{
+  ...
+}
+public V put(K key, V value) {
+    Entry<K,V> t = root;
+    if (t == null) {
+        compare(key, key); // type (and possibly null) check
+
+        root = new Entry<>(key, value, null);
+        size = 1;
+        modCount++;
+        return null;
+    }
+    int cmp;
+    Entry<K,V> parent;
+    // split comparator and comparable paths
+    Comparator<? super K> cpr = comparator;
+    if (cpr != null) {
+        do {
+            parent = t;
+            cmp = cpr.compare(key, t.key);
+            if (cmp < 0)
+                t = t.left;
+            else if (cmp > 0)
+                t = t.right;
+            else
+                return t.setValue(value);
+        } while (t != null);
+    }
+    else {
+        if (key == null)
+            throw new NullPointerException();
+        @SuppressWarnings("unchecked")
+            Comparable<? super K> k = (Comparable<? super K>) key;
+        do {
+            parent = t;
+            cmp = k.compareTo(t.key);
+            if (cmp < 0)
+                t = t.left;
+            else if (cmp > 0)
+                t = t.right;
+            else
+                return t.setValue(value);
+        } while (t != null);
+    }
+    Entry<K,V> e = new Entry<>(key, value, parent);
+    if (cmp < 0)
+        parent.left = e;
+    else
+        parent.right = e;
+    fixAfterInsertion(e);
+    size++;
+    modCount++;
+    return null;
+}
+```
 
 
 
@@ -1702,10 +1872,17 @@ public static ExecutorService newSingleThreadExecutor() {
                                 new LinkedBlockingQueue<Runnable>()));
 }
 
+// 
 public ScheduledThreadPoolExecutor(int corePoolSize,
                                    ThreadFactory threadFactory) {
   super(corePoolSize, Integer.MAX_VALUE, 0, NANOSECONDS,
         new DelayedWorkQueue(), threadFactory);
+}
+
+public static ExecutorService newFixedThreadPool(int nThreads) {
+  return new ThreadPoolExecutor(nThreads, nThreads,
+                                0L, TimeUnit.MILLISECONDS,
+                                new LinkedBlockingQueue<Runnable>());
 }
 ```
 
@@ -2644,35 +2821,52 @@ https://blog.csdn.net/carson_ho/article/details/82992269
 
 AQS锁是Java同步机制的基石，很多同步类都使用了AQS的同步机制。下面分几种应用场景来分析AQS的实现原理，AQS的实现场景可分为互斥锁、共享锁、条件锁三种情况
 
+AQS的临界资源为state可以灵活设置state实现不同锁机制：
+
+| 锁类型 | 锁情况                                                       |      |
+| ------ | ------------------------------------------------------------ | ---- |
+| 互斥锁 | 无锁：state == 0<br>有锁：考虑可重入的情况，state表示重入的次数 |      |
+|        |                                                              |      |
+|        |                                                              |      |
+
 
 
 ### 互斥机制
 
 互斥锁的情况的场景，比如ReentrantLock，
 
-实现这需要继承AbstractQueuedSynchronizer抽象类，并实现两个方法：tryAcquire和tryRelease。
+实现这需要继承AbstractQueuedSynchronizer抽象类，并实现两个抽象方法：tryAcquire和tryRelease。
 
-accquire和release是实现互斥机制的主体逻辑，下面将逐个分析：
+**accquire**和**release**是实现 ***互斥锁*** 机制的主体逻辑，下面将逐个分析：
+
+AbstractQueuedSynchronizer.java
 
 ```java
-    public final void acquire(int arg) {
-        if (!tryAcquire(arg) &&
-            acquireQueued(addWaiter(Node.EXCLUSIVE), arg))
-            selfInterrupt();
-    }
+// 1.获取互斥锁
+public final void acquire(int arg) {
+  // 公平锁在tryAcquire时会先判断：队列中有没有等待的线程并且此线程非本线程
+  if (!tryAcquire(arg) &&
+      acquireQueued(addWaiter(Node.EXCLUSIVE), arg))
+    selfInterrupt();
+}
 
-    public final boolean release(int arg) {
-        if (tryRelease(arg)) {
-            Node h = head;
-            if (h != null && h.waitStatus != 0)
-                unparkSuccessor(h);
-            return true;
-        }
-        return false;
-    }
+// 2.释放互斥锁
+public final boolean release(int arg) {
+  if (tryRelease(arg)) {
+    Node h = head;
+    if (h != null && h.waitStatus != 0)
+      unparkSuccessor(h);
+    return true;
+  }
+  return false;
+}
 ```
 
-#### acquire
+#### 获取锁
+
+调用tryAcquire尝试获取锁，获取不到则将此等待线程生成一个互斥节点加入到队列中，并在队列中等待通知获取锁；
+
+如果获取到锁之后就返回表示锁获取成功。
 
 ```java
 public final void acquire(int arg) {
@@ -2684,9 +2878,17 @@ public final void acquire(int arg) {
 }
 ```
 
-##### tryAcquire
+具体步骤如下：
 
-以具体实现类为准，这里以ReentrantLock为例
+1) 调用tryAcquire尝试获取锁，并返回是否获取锁成功。
+
+以具体实现类为准，这里以ReentrantLock的公平锁实现为例：
+
+首先获取当前临界资源state，分两种情况：
+
+state==0,表示无锁状态，如果队列中有等待线程，则直接返回false;否则尝试获取锁，也就是将state设置为1并设置独占线程。
+
+state != 0, 如果是当前线程，这种情况表示锁的重入情况，则对state进行加1操作。
 
 ```java
 protected final boolean tryAcquire(int acquires) {
@@ -2714,9 +2916,13 @@ protected final boolean tryAcquire(int acquires) {
 }
 ```
 
+2）获取不到锁，入队。
 
+首先生成一个新的node然后判断如果**tail节点**不为空的话直接加入到双链表中即可，否则执行enq操作。
 
-#### addWaiter
+如果队列为空则初始化。
+
+addWaiter后的CLH队列图示如下：
 
 
 
@@ -2741,33 +2947,7 @@ private Node addWaiter(Node mode) {
 }
 ```
 
-##### enq
-
-将无法获取到锁的线程入队
-
-```java
-private Node enq(final Node node) {
-    for (;;) {
-        Node t = tail;
-      	// 如果列表为空则初始化首节点，否则进行一次CAS操作，失败后重试
-      	// 首节点的waitStatus=0
-        if (t == null) { // Must initialize
-            if (compareAndSetHead(new Node()))
-                tail = head;
-        } else {
-            node.prev = t;
-            if (compareAndSetTail(t, node)) {
-                t.next = node;
-                return t;
-            }
-        }
-    }
-}
-```
-
-##### acquireQueued
-
-
+acquireQueued
 
 ```java
 final boolean acquireQueued(final Node node, int arg) {
@@ -2795,7 +2975,11 @@ final boolean acquireQueued(final Node node, int arg) {
 }
 ```
 
-#### release
+#### 释放锁
+
+释放锁是要对state操作，这里就是要减去相应的值。由于释放锁的时候已经获取到了锁，所以这里的操作是安全的；
+
+如果CLH队列中有后继节点，需要唤醒。
 
 ```java
 public final boolean release(int arg) {
@@ -2815,7 +2999,7 @@ public final boolean release(int arg) {
 
 ##### tryRelease
 
-以ReentrantLock为例。这里有个疑问：state的操作是不是原子的？
+以ReentrantLock为例。
 
 A:是，因为在accquire的时候state是volatile的，而且是CAS操作的，再加上线程内部的多次调用必然是异步的过程所以不会出现state多加或者多减的现象。
 
@@ -2875,16 +3059,17 @@ private void unparkSuccessor(Node node) {
 
 ### 共享机制
 
-AQS的共享锁机制主要由两个接口实现，继承者需要适量两个抽象接口:tryAcquireShared和tryReleaseShared
+AQS的共享锁机制主要由两个接口实现，继承者需要根据业务场景实现两个抽象接口:tryAcquireShared和tryReleaseShared。
 
-
+共享锁的实现包括：信号量、闭锁（CountDownLatch）和读写锁。
 
 ```java
+// 获取共享锁
 public final void acquireShared(int arg) {
     if (tryAcquireShared(arg) < 0)
         doAcquireShared(arg);
 }
-
+// 释放共享锁
 public final boolean releaseShared(int arg) {
     if (tryReleaseShared(arg)) {
         doReleaseShared();
@@ -2894,17 +3079,36 @@ public final boolean releaseShared(int arg) {
 }
 ```
 
-
-
-##### 读写锁
+#### 读写锁
 
 以读写锁为例分析
 
-读写锁巧妙设计了state，高16bit用于读锁，低16bit用于写锁。
+读写锁巧妙设计了临界资源state，高16bit用于共享锁，低16bit用于互斥锁。
+
+读写锁通过实现lock接口分别实现了读锁和写锁，但是两个锁共用了同一个AQS锁，也就是说对同一个临界资源state进行操作，达到读读共享、读写分离的目的。如下构造函数所示：
+
+```java
+public ReentrantReadWriteLock(boolean fair) {
+    sync = fair ? new FairSync() : new NonfairSync();
+    readerLock = new ReadLock(this);
+    writerLock = new WriteLock(this);
+}
+```
+
+##### 读锁
+
+###### 获取锁
 
 
 
-##### tryAcquireShared
+```java
+public final void acquireShared(int arg) {
+    if (tryAcquireShared(arg) < 0)
+        doAcquireShared(arg);
+}
+```
+
+tryAcquireShared
 
 ```java
 protected final int tryAcquireShared(int unused) {
@@ -2925,7 +3129,7 @@ protected final int tryAcquireShared(int unused) {
      */
     Thread current = Thread.currentThread();
     int c = getState();
-  	// 如果有写锁或者不是独占线程不是当前线程则返回-1
+  	// 检查state的低16bit，如果存在互斥锁并且不是本线程则返回-1
     if (exclusiveCount(c) != 0 &&
         getExclusiveOwnerThread() != current)
         return -1;
@@ -2952,7 +3156,7 @@ protected final int tryAcquireShared(int unused) {
 }
 ```
 
-##### doAcquireShared
+doAcquireShared
 
 这里是获取不到锁，进行入队的流程。和互斥模式的acquireQueued一样都有一个自旋的操作，获取不到锁就设置前驱节点状态然后park；不同的地方在于共享模式下会进行广播操作，通知CLH队列中的等待者。
 
@@ -2994,7 +3198,7 @@ private void doAcquireShared(int arg) {
 
 
 
-###### shouldParkAfterFailedAcquire
+shouldParkAfterFailedAcquire
 
 检查前驱节点的节点状态，如果不是signal置为signal
 
@@ -3028,7 +3232,7 @@ private static boolean shouldParkAfterFailedAcquire(Node pred, Node node) {
 }
 ```
 
-###### setHeadAndPropagate
+setHeadAndPropagate
 
 ```java
 private void setHeadAndPropagate(Node node, int propagate) {
@@ -3061,9 +3265,9 @@ private void setHeadAndPropagate(Node node, int propagate) {
 }
 ```
 
+###### 释放锁
 
-
-##### releaseShared
+releaseShared
 
 ```
 public final boolean releaseShared(int arg) {
@@ -3078,7 +3282,7 @@ public final boolean releaseShared(int arg) {
 
 
 
-###### tryReleaseShared
+tryReleaseShared
 
 ```java
 protected final boolean tryReleaseShared(int unused) {
@@ -3148,6 +3352,14 @@ private void doReleaseShared() {
     }
 }
 ```
+
+##### 写锁
+
+###### 获取锁
+
+
+
+###### 释放锁
 
 ### 条件锁
 
