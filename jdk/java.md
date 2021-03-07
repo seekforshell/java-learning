@@ -784,9 +784,13 @@ public PriorityQueue(int initialCapacity,
 
 
 
+### 双端队列
 
+双端队列，主要指实现了双端操作的队列模式，使得数据的操作更加灵活。
 
+#### Deque
 
+#### BlockingDeque
 
 ## Map
 
@@ -3467,8 +3471,6 @@ public final void signal() {
 
 
 ### 公平与非公平
-
-
 
 ## CAS
 

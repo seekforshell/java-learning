@@ -2,13 +2,7 @@
 
 ## 生产者
 
-### 生产者启动流程
-
-
-
-
-
-### 生产者发包流程图
+### 生产者发包流程
 
 <img src="images/io_flow.png" alt="image-20201125155533078" style="zoom:50%;" />
 
@@ -16,7 +10,9 @@
 
 #### ProducerRecord
 
-生产者发送消息的类，kafka发送的消息是以ProducerRecord的格式发送的。
+生产者发送**消息单元**的类，kafka发送的消息是以ProducerRecord的格式发送的。
+
+生产者在组装数据的时候需要指定4个参数：topic/partition/key/value，其中Key是可以随意指定的。
 
 ```java
 public class ProducerRecord<K, V> {
@@ -57,9 +53,48 @@ public Future<RecordMetadata> send(ProducerRecord<K, V> record, Callback callbac
 }
 ```
 
-
-
 doSend
+
+kafka的消息发送：
+
+发送消息统一由RecordAccumulator来管理，这个类可以管他叫记录的”蓄电池“，蓄满才发。
+
+蓄电池内部按分区存储一个双端队列，双端队列中包含了待发送的ProduceBatch，ProduceBatch由多个ProduceRecord组成，当分配给ProduceRecord的内存没有慢时可以继续往队列尾部加入待发送的消息。
+
+```java
+// RecordAccumulator重要字段
+private final AtomicInteger flushesInProgress;
+private final AtomicInteger appendsInProgress;	// 处于append中的record
+private final int batchSize;										// ProduceBatch大小
+private final CompressionType compression;
+private final int lingerMs;
+private final long retryBackoffMs;
+private final int deliveryTimeoutMs;
+private final BufferPool free;
+private final Time time;
+private final ApiVersions apiVersions;
+private final ConcurrentMap<TopicPartition, Deque<ProducerBatch>> batches;	// tp->双端队列
+private final IncompleteBatches incomplete;
+// The following variables are only accessed by the sender thread, so we don't need to protect them.
+private final Map<TopicPartition, Long> muted;
+private int drainIndex;
+private final TransactionManager transactionManager;	// 事务管理器
+private long nextBatchExpiryTimeMs = Long.MAX_VALUE; // the earliest time (absolute) a batch will expire.
+```
+
+具体发送流程如下：
+
+1.为消息分配Partition，这里的分配策略可以通过参数指定，比如按key的hash取topic的hash数，round--robin等
+
+2.计算要发送的消息的长度大小，包括producer的头部大小、消息头部的大小及报文负载本省需要的字节大小等
+
+3.确保消息大小合理，不能超出设定大小及设定的内存buffer大小
+
+4.往消息池中添加需要发送的消息，调用org.apache.kafka.clients.producer.internals.RecordAccumulator#append接口往蓄电池中蓄力 :)
+
+注意：这里会按partition来进行消息发送(批发送和消息压缩等) a.abortForNewBatch 为true，表示当tp对应的Deque为空或者当前ProducBatch已经满时需要分配新的ProduceBatch
+
+5.ProduceBatch写满后，也就是对应的partition写满后唤醒发送主线程发送数据
 
 ```java
 private Future<RecordMetadata> doSend(ProducerRecord<K, V> record, Callback callback) {
@@ -71,7 +106,7 @@ private Future<RecordMetadata> doSend(ProducerRecord<K, V> record, Callback call
         long nowMs = time.milliseconds();
         ClusterAndWaitTime clusterAndWaitTime;
         try {
-          	// 这里需要等待topic/partition的元数据更新，比如partition的个数等
+          	// 这里需要等待topic/partition的元数据更新，比如partition信息、主partition的leader选举等
             clusterAndWaitTime = waitOnMetadata(record.topic(), record.partition(), nowMs, maxBlockTimeMs);
         } catch (KafkaException e) {
             if (metadata.isClosed())
@@ -99,17 +134,17 @@ private Future<RecordMetadata> doSend(ProducerRecord<K, V> record, Callback call
                     " to class " + producerConfig.getClass(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG).getName() +
                     " specified in value.serializer", cce);
         }
-      	// 为消息分配Partition，这里的分配策略可以通过参数指定，比如按key的hash取topic的hash数，round--robin等策略
+      	// 1.为消息分配Partition，这里的分配策略可以通过参数指定，比如按key的hash取topic的hash数，round--robin等策略
         int partition = partition(record, serializedKey, serializedValue, cluster);
         tp = new TopicPartition(record.topic(), partition);
 
         setReadOnly(record.headers());
         Header[] headers = record.headers().toArray();
 
-      	// 计算要发送的消息的长度大小，包括producer的头部大小、消息头部的大小及报文负载本省需要的字节大小等
+      	// 2.计算要发送的消息的长度大小，包括producer的头部大小、消息头部的大小及报文负载本省需要的字节大小等
         int serializedSize = AbstractRecords.estimateSizeInBytesUpperBound(apiVersions.maxUsableProduceMagic(),
                 compressionType, serializedKey, serializedValue, headers);
-      	// 确保消息大小合理，不能超出设定大小及设定的内存buffer大小
+      	// 3.确保消息大小合理，不能超出设定大小及设定的内存buffer大小
         ensureValidRecordSize(serializedSize);
         long timestamp = record.timestamp() == null ? nowMs : record.timestamp();
         if (log.isTraceEnabled()) {
@@ -121,10 +156,11 @@ private Future<RecordMetadata> doSend(ProducerRecord<K, V> record, Callback call
         if (transactionManager != null && transactionManager.isTransactional()) {
             transactionManager.failIfNotReadyForSend();
         }
-      	// 往消息池中添加需要发送的消息，注意：这里会按partition来进行消息发送（批发送和消息压缩等）
+      	// 4.往消息池中添加需要发送的消息，注意：这里会按partition来进行消息发送（批发送和消息压缩等）
+      	// a.abortForNewBatch 为true，表示当tp对应的Deque为空或者当前ProducBatch已经满时需要分配新的ProduceBatch
         RecordAccumulator.RecordAppendResult result = accumulator.append(tp, timestamp, serializedKey,
                 serializedValue, headers, interceptCallback, remainingWaitMs, true, nowMs);
-
+				// 新生成ProduceBatch
         if (result.abortForNewBatch) {
             int prevPartition = partition;
             partitioner.onNewBatch(record.topic(), cluster, prevPartition);
@@ -139,12 +175,18 @@ private Future<RecordMetadata> doSend(ProducerRecord<K, V> record, Callback call
             result = accumulator.append(tp, timestamp, serializedKey,
                 serializedValue, headers, interceptCallback, remainingWaitMs, false, nowMs);
         }
-
+      
+				// 添加topic-partion到事务管理器中newPartitionsInTransaction，后面在发送消息时事务管理器会将其加入到 
+      	// pendingPartitionsInTransaction
         if (transactionManager != null && transactionManager.isTransactional())
             transactionManager.maybeAddPartitionToTransaction(tp);
 
+      	// ProduceBatch写满后，也就是对应的partition写满后唤醒发送主线程发送数据
+      	// 从这里的日志可以看出消息的延时大小
+      	// 5.调用org.apache.kafka.clients.producer.internals.Sender#run发送数据
         if (result.batchIsFull || result.newBatchCreated) {
             log.trace("Waking up the sender since topic {} partition {} is either full or getting a new batch", record.topic(), partition);
+          	
             this.sender.wakeup();
         }
       	// 返回消息发送的同步future
@@ -184,11 +226,7 @@ private Future<RecordMetadata> doSend(ProducerRecord<K, V> record, Callback call
 
 #### RecordAccumulator
 
-
-
 此类是生产者的消息池，相当于一个缓冲队列的角色。
-
-
 
 ```java
 public RecordAccumulator(LogContext logContext,
@@ -230,7 +268,9 @@ public RecordAccumulator(LogContext logContext,
 }
 ```
 
-org.apache.kafka.clients.producer.internals.RecordAccumulator#append
+延续org.apache.kafka.clients.producer.KafkaProducer#doSend调用，下面分析
+
+org.apache.kafka.clients.producer.internals.RecordAccumulator#append的流程。
 
 ```java
 public RecordAppendResult append(TopicPartition tp,
@@ -248,30 +288,32 @@ public RecordAppendResult append(TopicPartition tp,
     ByteBuffer buffer = null;
     if (headers == null) headers = Record.EMPTY_HEADERS;
     try {
-        // 获取分区的双端队列，没有则初始化
+        // 1.获取分区的双端队列，没有则初始化队列
         Deque<ProducerBatch> dq = getOrCreateDeque(tp);
         synchronized (dq) {
             if (closed)
                 throw new KafkaException("Producer closed while send in progress");
-          	// 尝试往最后一个元素里追加消息如果列表为空则返回Null
+          	// 1.1 尝试往分区相应队列最后一个batch里追加消息如果列表为空或者最后一个batch已经写满则返回Null
+          	// 返回为null时走下面的创建新batch流程
             RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callback, dq, nowMs);
             if (appendResult != null)
                 return appendResult;
         }
 
-        // we don't have an in-progress record batch try to allocate a new batch
+        // 2.是否新添加一个Batch
         if (abortOnNewBatch) {
             // Return a result that will cause another call to append.
             return new RecordAppendResult(null, false, false, true);
         }
 
+      	// 3.添加新batch流程
       	// 以下步骤为创建分区对应的ProducerBatch的过程，然后添加到双端队列尾部
         byte maxUsableMagic = apiVersions.maxUsableProduceMagic();
-      	// 计算发送分区消息的批大小（也就是说当消息累计到此数量时发送消息，这个数量会影响发送算的吞吐量）
+      	// 3.1 计算发送分区消息的批大小（也就是说当消息累计到此数量时发送消息，这个数量会影响发送算的吞吐量）
       	// 这里取消息大小和设定值中的最大值，因为可能消息会很大
         int size = Math.max(this.batchSize, AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, compression, key, value, headers));
         log.trace("Allocating a new {} byte message buffer for topic {} partition {}", size, tp.topic(), tp.partition());
-      	// 内存池分配大小
+      	// 3.2 从内存池分配batch大小
         buffer = free.allocate(size, maxTimeToBlock);
 
         // Update the current time in case the buffer allocation blocked above.
@@ -280,14 +322,15 @@ public RecordAppendResult append(TopicPartition tp,
             // Need to check if producer is closed again after grabbing the dequeue lock.
             if (closed)
                 throw new KafkaException("Producer closed while send in progress");
-						// 这里首先再次尝试，因为有可能存在竞态条件
+						// 3.3 这里首先再次尝试，因为有可能存在竞态条件
             RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callback, dq, nowMs);
             if (appendResult != null) {
                 // Somebody else found us a batch, return the one we waited for! Hopefully this doesn't happen often...
                 return appendResult;
             }
-						// 创建消息构建起
+						// 3.4 创建recordBuilder
             MemoryRecordsBuilder recordsBuilder = recordsBuilder(buffer, maxUsableMagic);
+          	// 3.5 创建batch并加入队列
             ProducerBatch batch = new ProducerBatch(tp, recordsBuilder, nowMs);
             FutureRecordMetadata future = Objects.requireNonNull(batch.tryAppend(timestamp, key, value, headers,
                     callback, nowMs));
@@ -307,13 +350,53 @@ public RecordAppendResult append(TopicPartition tp,
 }
 ```
 
+3.4 recordBuilder生成
+
+```java
+// MemoryRecordsBuilder
+public static MemoryRecordsBuilder builder(ByteBuffer buffer,
+                                             byte magic,
+                                             CompressionType compressionType,
+                                             TimestampType timestampType,
+                                             long baseOffset) {
+  long logAppendTime = RecordBatch.NO_TIMESTAMP;
+  if (timestampType == TimestampType.LOG_APPEND_TIME)
+    logAppendTime = System.currentTimeMillis();
+  return builder(buffer, magic, compressionType, timestampType, baseOffset, logAppendTime,
+                 RecordBatch.NO_PRODUCER_ID, RecordBatch.NO_PRODUCER_EPOCH, RecordBatch.NO_SEQUENCE, false,
+                 RecordBatch.NO_PARTITION_LEADER_EPOCH);
+}
+
+public MemoryRecordsBuilder(ByteBuffer buffer,	// 申请的内存
+                            byte magic,
+                            CompressionType compressionType,
+                            TimestampType timestampType,
+                            long baseOffset,
+                            long logAppendTime,
+                            long producerId,
+                            short producerEpoch,
+                            int baseSequence,
+                            boolean isTransactional,
+                            boolean isControlBatch,
+                            int partitionLeaderEpoch,
+                            int writeLimit) {
+  this(new ByteBufferOutputStream(buffer), magic, compressionType, timestampType, baseOffset, logAppendTime,
+       producerId, producerEpoch, baseSequence, isTransactional, isControlBatch, partitionLeaderEpoch,
+       writeLimit);
+}
+```
+
 tryAppend
+
+tryAppend是实际添加ProcuceRecord数据到Batch的过程。
 
 ```java
 public FutureRecordMetadata tryAppend(long timestamp, byte[] key, byte[] value, Header[] headers, Callback callback, long now) {
+  	// 判断Batch是否写满
     if (!recordsBuilder.hasRoomFor(timestamp, key, value, headers)) {
         return null;
     } else {
+      	// 使用builder写
         Long checksum = this.recordsBuilder.append(timestamp, key, value, headers);
         this.maxRecordSize = Math.max(this.maxRecordSize, AbstractRecords.estimateSizeInBytesUpperBound(magic(),
                 recordsBuilder.compressionType(), key, value, headers));
@@ -332,9 +415,26 @@ public FutureRecordMetadata tryAppend(long timestamp, byte[] key, byte[] value, 
 }
 ```
 
+
+
+org.apache.kafka.clients.producer.internals.ProducerBatch#tryAppend
+
+org.apache.kafka.common.record.MemoryRecordsBuilder#append
+
+```java
+public Long append(long timestamp, ByteBuffer key, ByteBuffer value, Header[] headers) {
+  	// 初始化seq
+    return appendWithOffset(nextSequentialOffset(), timestamp, key, value, headers);
+}
+
+private long nextSequentialOffset() {
+  return lastOffset == null ? baseOffset : lastOffset + 1;
+}
+```
+
 那么这些数据加到accumulator中的数据什么发送的呢，看下面的分解：
 
-
+#### Sender
 
 生成KafkaProducer的时候会生成相应的Sender，以下是sender的主流程，
 
@@ -599,7 +699,11 @@ PRODUCE(0, "Produce", ProduceRequest.schemaVersions(), ProduceResponse.schemaVer
 
 kafka如何保持幂等性？引入了PID（epoch）和seq的概念。
 
-首先seq在哪里分配的？主流程如下，broker端收到生产者发送的消息后，如果ack=0则不需要回复消息，否则回复ProduceResponse消息，客户端回调处理，将seq更新，如果报错则重发报文从而实现幂等性
+首先seq在哪里分配的？主流程如下，broker端收到生产者发送的消息后，如果ack=0则不需要回复消息，否则回复ProduceResponse消息，客户端回调处理，将seq更新，如果报错则重发报文从而实现幂等性。
+
+下面从Producer和Broker两个角度分析：
+
+**a.Producer是适合保证有序性的？**
 
 下面是生产者在发送过程中分配RecordBatch的流程：
 
@@ -683,6 +787,32 @@ private List<ProducerBatch> drainBatchesForOneNode(Cluster cluster, Node node, i
     return ready;
 }
 ```
+
+**b.broker是如何保证有序性的？**
+
+这里的流程跟解读可以解答为什么Producer端的*max.in.flight.requests.per.connection*参数最大可以是5？
+
+参考事务机制-事务状态管理章节
+
+kafka.log.Log#append
+
+​	   kafka.log.Log#analyzeAndValidateProducerState
+
+​		kafka.log.Log#updateProducers
+
+​		kafka.log.ProducerAppendInfo#append
+
+​		kafka.log.ProducerAppendInfo#appendDataBatch
+
+​		kafka.log.ProducerAppendInfo#maybeValidateDataBatch
+
+​		kafka.log.ProducerAppendInfo#checkSequence
+
+​	kafka.log.LogSegment#append
+
+**checkSequence**
+
+这里根据RecordBatch的序列号检查是否为当前写入到的日志的序列号+1.
 
 
 
@@ -882,6 +1012,7 @@ def appendRecordsToLeader(records: MemoryRecords, origin: AppendOrigin, required
           interBrokerProtocolVersion)
 
         // we may need to increment high watermark since ISR could be down to 1
+      	// 更新高水位：= min(ISR列表中的LEO)
         (info, maybeIncrementLeaderHW(leaderLog))
 
       case None =>
@@ -1102,6 +1233,10 @@ private def append(records: MemoryRecords,
 }
 ```
 
+### FetchRequest
+
+FetchRequest是用来副本节点向leader节点同步日志、元数据等信息用的。
+
 
 
 ## 事务机制
@@ -1113,6 +1248,94 @@ private def append(records: MemoryRecords,
 **事务状态在内存中有缓存，采用读写锁的方式保护，写入日志成功后回调更新内存中事务的缓存信息；**
 
 **写入日志成功后会更新HW，HW更新是所有分区副本（必须是ISR或者允许lag范围内的）中LEO的最小值。**
+
+#### 事务状态管理
+
+kafka的事务性和幂等性离不开ProducerStateManager这个类，此类管理每个Log实例，也就是说每个lead partition对应一个状态管理器。
+
+那么状态管理器管理哪些事情呢？
+
+1.在内存中管理每个Producer的元数据状态（producerId,epoch,seq等）
+
+其中有个producers的字段，存储了所有producer的状态*ProducerStateEntry*
+
+此类有如下定义：
+
+```java
+private[log] object ProducerStateEntry {
+  // 此字段用于增加保持幂等性下的并发性能
+  private[log] val NumBatchesToRetain = 5
+
+  def empty(producerId: Long) = new ProducerStateEntry(producerId,
+    batchMetadata = mutable.Queue[BatchMetadata](),
+    producerEpoch = RecordBatch.NO_PRODUCER_EPOCH,
+    coordinatorEpoch = -1,
+    lastTimestamp = RecordBatch.NO_TIMESTAMP,
+    currentTxnFirstOffset = None)
+}
+```
+
+```java
+// Maintains a mapping from ProducerIds to metadata about the last appended entries (e.g.
+ * epoch, sequence number, last offset, etc.)
+class ProducerStateManager(val topicPartition: TopicPartition,
+                           @volatile var logDir: File,
+                           val maxProducerIdExpirationMs: Int = 60 * 60 * 1000) extends Logging {
+   // 重要字段如下
+  this.logIdent = s"[ProducerStateManager partition=$topicPartition] "
+
+  private val producers = mutable.Map.empty[Long, ProducerStateEntry]
+  private var lastMapOffset = 0L
+  private var lastSnapOffset = 0L
+
+  // ongoing transactions sorted by the first offset of the transaction
+  private val ongoingTxns = new util.TreeMap[Long, TxnMetadata]
+
+  // completed transactions whose markers are at offsets above the high watermark
+  private val unreplicatedTxns = new util.TreeMap[Long, TxnMetadata]
+  ......
+}    
+```
+
+2.持久化日志信息
+
+kafka事务通过定时写snapshot备份事务的元数据信息。
+
+```java
+private def writeSnapshot(file: File, entries: mutable.Map[Long, ProducerStateEntry]): Unit = {
+  val struct = new Struct(PidSnapshotMapSchema)
+  struct.set(VersionField, ProducerSnapshotVersion)
+  struct.set(CrcField, 0L) // we'll fill this after writing the entries
+  val entriesArray = entries.map {
+    case (producerId, entry) =>
+      val producerEntryStruct = struct.instance(ProducerEntriesField)
+      producerEntryStruct.set(ProducerIdField, producerId)
+        .set(ProducerEpochField, entry.producerEpoch)
+        .set(LastSequenceField, entry.lastSeq)
+        .set(LastOffsetField, entry.lastDataOffset)
+        .set(OffsetDeltaField, entry.lastOffsetDelta)
+        .set(TimestampField, entry.lastTimestamp)
+        .set(CoordinatorEpochField, entry.coordinatorEpoch)
+        .set(CurrentTxnFirstOffsetField, entry.currentTxnFirstOffset.getOrElse(-1L))
+      producerEntryStruct
+  }.toArray
+  struct.set(ProducerEntriesField, entriesArray)
+
+  val buffer = ByteBuffer.allocate(struct.sizeOf)
+  struct.writeTo(buffer)
+  buffer.flip()
+
+  // now fill in the CRC
+  val crc = Crc32C.compute(buffer, ProducerEntriesOffset, buffer.limit() - ProducerEntriesOffset)
+  ByteUtils.writeUnsignedInt(buffer, CrcOffset, crc)
+
+  val fileChannel = FileChannel.open(file.toPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE)
+  try fileChannel.write(buffer)
+  finally fileChannel.close()
+}
+```
+
+
 
 #### 客户端流程
 
@@ -1283,7 +1506,7 @@ val recordsPerPartition = Map(topicPartition -> records)
 
 
 
-## 网络收发流程
+## 漫谈Kafka网络模型
 
 
 
@@ -2272,6 +2495,51 @@ private KafkaConsumer(ConsumerConfig config,
     }
 }
 ```
+
+## 性能调优
+
+
+
+性能调优参数
+
+
+
+producer参数调优：
+
+| 参数配置            | 说明                                                         |      |
+| ------------------- | ------------------------------------------------------------ | ---- |
+| buffer.memory       | 默认为3M。生产者缓存消息的内存使用大小，此设置决定了你能够缓存多少数据，延时与吞吐量的一个选择；此参数用于初始化生产者缓存池的大小 |      |
+| max.request.size    | 发送单个消息的最大字节数，发送消息时会检查                   |      |
+| batch.size          | 发送                                                         |      |
+| min.insync.replicas |                                                              |      |
+| acks                |                                                              |      |
+|                     |                                                              |      |
+
+说明：
+
+batch.size：ProducerBatch的大小，从下面代码可以看出，这里分配的内存batch buffer的大小是实际的消息内存字节数和指定的batch.size大小的最大值。
+
+```java
+int size = Math.max(this.batchSize, AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, compression, key, value, headers));
+log.trace("Allocating a new {} byte message buffer for topic {} partition {}", size, tp.topic(), tp.partition());
+buffer = free.allocate(size, maxTimeToBlock);
+```
+
+broker端参数调优：
+
+
+
+
+
+### 如何提升吞吐量？
+
+
+
+
+
+参考：
+
+https://blog.csdn.net/u012811805/article/details/106152956
 
 ## 副本机制
 
