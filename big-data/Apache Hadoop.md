@@ -534,7 +534,22 @@ public void run(JobConf job, final TaskUmbilicalProtocol umbilical)
 
 
 
+## 调度策略
+
+| 策略名            |      |      |
+| ----------------- | ---- | ---- |
+| CapacityScheduler |      |      |
+| FifoScheduler     |      |      |
+| FairScheduler     |      |      |
+
+https://blog.csdn.net/xiaomage510/article/details/82500067
+
 # Hive
 
 
 
+
+
+常见问题参考：
+
+https://zhuanlan.zhihu.com/p/75550159

@@ -10,8 +10,6 @@
 
 jvm调优主要关注响应时间和吞吐量两个方便。
 
-
-
 - 响应时间
 
 Responsiveness refers to how quickly an application or system responds with a requested piece of data. Examples include:
@@ -39,8 +37,6 @@ jvm调优的关键组件
 
 
 # Java内存区域
-
-
 
 ## 概述
 
@@ -126,12 +122,37 @@ https://www.cnblogs.com/czwbig/p/11127124.html
 
 # 收集器
 
-### GC root
+### GC
+
+#### Minor gc和Full gc
+
+##### Minor gc
+
+**Minor GC触发机制：**
+当年轻代满时就会触发Minor GC，这里的年轻代满指的是Eden代满，Survivor满不会引发GC。
+
+<img src="images/minor_gc.png" alt="Minor GC" style="zoom:50%;" />
+
+##### Full GC
+
+**Full GC触发机制：**
+（1）调用System.gc时，系统建议执行Full GC，但是不必然执行
+（2）老年代空间不足
+（3）方法区空间不足
+（4）通过Minor GC后进入老年代的平均大小大于老年代的可用内存
+（5）由Eden区、survivor space1（From Space）区向survivor space2（To Space）区复制时，对象大小大于To Space可用内存，则把该对象转存到老年代，且老年代的可用内存小于该对象大小
+
+#### GC root
 
 1. 虚拟机栈(栈桢中的本地变量表)中的引用的对象 ；
+
 2. 方法区中的类静态属性引用的对象 ；
+
 3. 方法区中的常量引用的对象 ；
+
 4. 本地方法栈中JNI的引用的对象；
+
+    
 
 ### 概述
 
@@ -157,8 +178,6 @@ https://www.cnblogs.com/czwbig/p/11127124.html
 
 ### CMS
 
-
-
 #### 介绍
 
 cms收集器内存被分为三块：
@@ -170,8 +189,6 @@ cms收集器内存被分为三块：
 #### 收集算法
 
 ##### Young GC回收流程
-
-
 
 young gc的回收流程是年轻代的收集算法而定，基本使用复制算法。
 

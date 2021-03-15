@@ -4,11 +4,7 @@
 
 参考文档：
 
-
-
 https://www.jianshu.com/p/4d31d6cddc99
-
-
 
 # 应用场景
 
@@ -33,8 +29,6 @@ https://flink.apache.org/zh/usecases.html
 1.Flink 的客户端、JobManager是使用akka rpc消息系统进行任务的管理、状态等消息通信的
 
 2.JobManager会生成对应的jobGraph/executionGraph，使用Scheduler作为任务的管理者，使用checkpointCoordinator作为协调者
-
-
 
 ### JobManager
 
@@ -85,6 +79,17 @@ flink 状态的全局快照生成核心思想源自分布式快照算法（Chand
 flink与分布式算法有些不同点，比如flink的state叫barrier，并且是DAG的。那么此分布式快照算法的好处在哪呢？不需要锁来进行分布式同步，所有算子都是异步进行checkpoint的。
 
 参考文章：https://www.jianshu.com/p/06fff1ffe0a7
+
+### 一致性场景
+
+**精确一次语义**
+
+端到端的精确一致性：
+
+为了实现端到端的精确一次，以便 sources 中的每个事件都仅精确一次对 sinks 生效，必须满足以下条件：
+
+1. 你的 sources 必须是可重放的，并且
+2. 你的 sinks 必须是事务性的（或幂等的）
 
 ## Checkpoint
 

@@ -1712,14 +1712,14 @@ protected ThreadPoolExecutor createExecutor(
 
 线程参数：
 
-| 参数                     | 作用       | 说明                          |
-| ------------------------ | ---------- | ----------------------------- |
-| corePoolSize             | 核心线程数 |                               |
-| maxPoolSize              | 最大线程数 | 触发使用最大线程条件：<br/>1. |
-| keepAliveSeconds         |            |                               |
-| queue                    |            |                               |
-| threadFactory            |            |                               |
-| rejectedExecutionHandler |            |                               |
+| 参数                     | 作用                     | 说明                                          |
+| ------------------------ | ------------------------ | --------------------------------------------- |
+| corePoolSize             | 核心线程数               |                                               |
+| maxPoolSize              | 最大线程数               | 触发使用最大线程条件：<br/>1.工作队列已经满了 |
+| keepAliveSeconds         | 回收工作线程的空闲时间   |                                               |
+| queue                    | 用于存储工作队列         |                                               |
+| threadFactory            | 创建工作现成的工厂实现类 |                                               |
+| rejectedExecutionHandler | 拒绝策略                 |                                               |
 
 接口线程工厂：可以自定义线程创建过程，比如设置线程优先级、线程组、是否守护线程等属性
 
