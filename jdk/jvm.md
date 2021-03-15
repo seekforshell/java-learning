@@ -333,6 +333,20 @@ https://www.oracle.com/technetwork/tutorials/tutorials-1876574.html
 
 
 
+常见命令行：
+
+
+
+```shell
+# 存活对象排行榜
+$ jmap -histo:live 4762 | head -20
+# 对象转储文件
+$ jmap -dump:format=b,file=476220190829.bin 4762
+
+```
+
+
+
 ## CPU飙升
 
 
@@ -364,3 +378,7 @@ Iftop
 ipstat
 
 ## 内存溢出及泄露
+
+定位文档：
+
+https://blog.csdn.net/cn_honor/article/details/100143214

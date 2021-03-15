@@ -236,6 +236,294 @@ https://zhuanlan.zhihu.com/p/61774441
 
 # MapReduce
 
+## MRAppMaster剖析
+
+
+
+org.apache.hadoop.mapreduce.v2.app.MRAppMaster
+
+
+
+参考：
+
+https://www.jianshu.com/p/b81e4d9495d7
+
+
+
+## 从wordcount看mapreduce
+
+
+
+
+
+TextInputFormat负责split文件到多个mapper，mapper的划分由datablock的数量进行划分，这里的datablock可以理解为hdfs的block大小。
+
+
+
+从hadoop的MapReduce appMaster来看，其具体逻辑实现比较复杂，如果想弄明白底层逻辑实现，关键点有如下几个：
+
+1) mapreduce程序目前仅实现了yarn的调度，因此appMaster实现逻辑应大致清楚
+
+2) mapreduce 过程分jobImpl -> TaskImpl -> TaskAttemptImpl三个主题逻辑，每一个主题逻辑都有相应的状态机，通过dispatch来管理事件并下发执行handler，然后落实到状态机的更变；
+
+3) 两个入口类：
+
+```
+// job的入口执行类
+org.apache.hadoop.mapreduce.v2.app.MRAppMaster
+
+// job所有的task对应的入口实现类
+org.apache.hadoop.mapred.YarnChild
+```
+
+
+
+实例如下：
+
+org.apache.hadoop.examples.WordCount
+
+```java
+public static void main(String[] args) throws Exception {
+  Configuration conf = new Configuration();
+  String[] otherArgs = new GenericOptionsParser(conf, args).getRemainingArgs();
+  if (otherArgs.length < 2) {
+    System.err.println("Usage: wordcount <in> [<in>...] <out>");
+    System.exit(2);
+  }
+  Job job = Job.getInstance(conf, "word count");
+  job.setJarByClass(WordCount.class);
+  // 设置mapper类实现
+  job.setMapperClass(TokenizerMapper.class);
+  job.setCombinerClass(IntSumReducer.class);
+  job.setReducerClass(IntSumReducer.class);
+  job.setOutputKeyClass(Text.class);
+  job.setOutputValueClass(IntWritable.class);
+  for (int i = 0; i < otherArgs.length - 1; ++i) {
+    FileInputFormat.addInputPath(job, new Path(otherArgs[i]));
+  }
+  FileOutputFormat.setOutputPath(job,
+    new Path(otherArgs[otherArgs.length - 1]));
+  System.exit(job.waitForCompletion(true) ? 0 : 1);
+}
+```
+
+### MapTask实现
+
+
+
+org.apache.hadoop.mapreduce.Mapper#run
+
+```java
+public void run(Context context) throws IOException, InterruptedException {
+  setup(context);
+  try {
+    while (context.nextKeyValue()) {
+      // 这里才是真正执行map的地方
+      map(context.getCurrentKey(), context.getCurrentValue(), context);
+    }
+  } finally {
+    cleanup(context);
+  }
+}
+```
+
+以wordcount为例，mapper类实现如下：
+
+```java
+public static class TokenizerMapper 
+     extends Mapper<Object, Text, Text, IntWritable>{
+  
+  private final static IntWritable one = new IntWritable(1);
+  private Text word = new Text();
+  // 一个mapTask中会有多个key.value，context包含了此任务的input和output等信息，用来读取或者写入
+  public void map(Object key, Text value, Context context
+                  ) throws IOException, InterruptedException {
+    StringTokenizer itr = new StringTokenizer(value.toString());
+    while (itr.hasMoreTokens()) {
+      word.set(itr.nextToken());
+      
+      context.write(word, one);
+    }
+  }
+}
+```
+
+以下有个context实例，此处省略了上下文代码，然后紧接着剖析output看是如何将输出发送到对应的reducer的：
+
+```java
+// get an output object
+if (job.getNumReduceTasks() == 0) {
+  output = 
+    new NewDirectOutputCollector(taskContext, job, umbilical, reporter);
+} else {
+  output = new NewOutputCollector(taskContext, job, umbilical, reporter);
+}
+
+org.apache.hadoop.mapreduce.MapContext<INKEY, INVALUE, OUTKEY, OUTVALUE> 
+mapContext = 
+  new MapContextImpl<INKEY, INVALUE, OUTKEY, OUTVALUE>(job, getTaskID(), 
+      input, output, 
+      committer, 
+      reporter, split);
+```
+
+
+
+MapContext中的output实现
+
+```java
+NewOutputCollector(org.apache.hadoop.mapreduce.JobContext jobContext,
+                     JobConf job,
+                     TaskUmbilicalProtocol umbilical,
+                     TaskReporter reporter
+                     ) throws IOException, ClassNotFoundException {
+    collector = createSortingCollector(job, reporter);
+  	// 查看reducer个数
+    partitions = jobContext.getNumReduceTasks();
+  	// 大于1时会有一个均衡策略，可通过mapreduce.job.partitioner.class设置
+    if (partitions > 1) {
+      partitioner = (org.apache.hadoop.mapreduce.Partitioner<K,V>)
+        ReflectionUtils.newInstance(jobContext.getPartitionerClass(), job);
+    } else {
+      partitioner = new org.apache.hadoop.mapreduce.Partitioner<K,V>() {
+        @Override
+        public int getPartition(K key, V value, int numPartitions) {
+          return partitions - 1;
+        }
+      };
+    }
+  }
+
+  @Override
+  public void write(K key, V value) throws IOException, InterruptedException {
+    // 这里的collector 我们选择org.apache.hadoop.mapred.MapTask.MapOutputBuffer分析
+    collector.collect(key, value,
+                      partitioner.getPartition(key, value, partitions));
+  }
+
+  @Override
+  public void close(TaskAttemptContext context
+                    ) throws IOException,InterruptedException {
+    try {
+      collector.flush();
+    } catch (ClassNotFoundException cnf) {
+      throw new IOException("can't find class ", cnf);
+    }
+    collector.close();
+  }
+}
+```
+
+最终每个mapTask会写到
+
+```java
+// create spill file
+final SpillRecord spillRec = new SpillRecord(partitions);
+final Path filename =
+    mapOutputFile.getSpillFileForWrite(numSpills, size);
+out = rfs.create(filename);
+
+public Path getSpillFileForWrite(int spillNumber, long size)
+  throws IOException {
+  return lDirAlloc.getLocalPathForWrite(
+    String.format(SPILL_FILE_PATTERN,
+                  conf.get(JobContext.TASK_ATTEMPT_ID), spillNumber), size, conf);
+}
+```
+
+org.apache.hadoop.mapred.MapTask.MapOutputBuffer#sortAndSpill
+
+
+
+### ReduceTask实现
+
+
+
+org.apache.hadoop.mapred.ReduceTask#run
+
+```java
+public void run(JobConf job, final TaskUmbilicalProtocol umbilical)
+  throws IOException, InterruptedException, ClassNotFoundException {
+  job.setBoolean(JobContext.SKIP_RECORDS, isSkipping());
+
+  if (isMapOrReduce()) {
+    copyPhase = getProgress().addPhase("copy");
+    sortPhase  = getProgress().addPhase("sort");
+    reducePhase = getProgress().addPhase("reduce");
+  }
+  // start thread that will handle communication with parent
+  TaskReporter reporter = startReporter(umbilical);
+  
+  boolean useNewApi = job.getUseNewReducer();
+  initialize(job, getJobID(), reporter, useNewApi);
+
+  // check if it is a cleanupJobTask
+  if (jobCleanup) {
+    runJobCleanupTask(umbilical, reporter);
+    return;
+  }
+  if (jobSetup) {
+    runJobSetupTask(umbilical, reporter);
+    return;
+  }
+  if (taskCleanup) {
+    runTaskCleanupTask(umbilical, reporter);
+    return;
+  }
+  
+  // Initialize the codec
+  codec = initCodec();
+  RawKeyValueIterator rIter = null;
+  ShuffleConsumerPlugin shuffleConsumerPlugin = null;
+  
+  Class combinerClass = conf.getCombinerClass();
+  CombineOutputCollector combineCollector = 
+    (null != combinerClass) ? 
+   new CombineOutputCollector(reduceCombineOutputCounter, reporter, conf) : null;
+
+  Class<? extends ShuffleConsumerPlugin> clazz =
+        job.getClass(MRConfig.SHUFFLE_CONSUMER_PLUGIN, Shuffle.class, ShuffleConsumerPlugin.class);
+         
+  shuffleConsumerPlugin = ReflectionUtils.newInstance(clazz, job);
+  LOG.info("Using ShuffleConsumerPlugin: " + shuffleConsumerPlugin);
+
+  ShuffleConsumerPlugin.Context shuffleContext = 
+    new ShuffleConsumerPlugin.Context(getTaskID(), job, FileSystem.getLocal(job), umbilical, 
+                super.lDirAlloc, reporter, codec, 
+                combinerClass, combineCollector, 
+                spilledRecordsCounter, reduceCombineInputCounter,
+                shuffledMapsCounter,
+                reduceShuffleBytes, failedShuffleCounter,
+                mergedMapOutputsCounter,
+                taskStatus, copyPhase, sortPhase, this,
+                mapOutputFile, localMapFiles);
+  shuffleConsumerPlugin.init(shuffleContext);
+
+  rIter = shuffleConsumerPlugin.run();
+
+  // free up the data structures
+  mapOutputFilesOnDisk.clear();
+  
+  sortPhase.complete();                         // sort is complete
+  setPhase(TaskStatus.Phase.REDUCE); 
+  statusUpdate(umbilical);
+  Class keyClass = job.getMapOutputKeyClass();
+  Class valueClass = job.getMapOutputValueClass();
+  RawComparator comparator = job.getOutputValueGroupingComparator();
+
+  if (useNewApi) {
+    runNewReducer(job, umbilical, reporter, rIter, comparator, 
+                  keyClass, valueClass);
+  } else {
+    runOldReducer(job, umbilical, reporter, rIter, comparator, 
+                  keyClass, valueClass);
+  }
+
+  shuffleConsumerPlugin.close();
+  done(umbilical, reporter);
+}
+```
+
 
 
 # YARN
