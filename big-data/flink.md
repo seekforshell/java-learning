@@ -58,6 +58,163 @@ https://flink.apache.org/zh/usecases.html
 
 # 功能与特性
 
+## 处理函数
+
+处理函数是Flink中一个很重要的概念。它表示流中的每个元素的处理逻辑，并将定时器、状态结合在一起。
+
+## 窗口
+
+窗口使用示例：
+
+TumblingEventTimeWindows是window的assginer，每处理一个会给每个元素生成一个窗口，比如这里是TimeWindow，其中包含了改元素所属的窗口范围。
+
+```java
+DataStream<Tuple2<String, Integer>> counts =
+        tokenized
+                .keyBy(value -> value.f0)
+                .window(TumblingEventTimeWindows.of(Time.seconds(5)))
+                // group by the tuple field "0" and sum up tuple field "1"
+                .sum(1);
+```
+
+接着调用.window，这里生成一个WindowedStream，
+
+```java
+@PublicEvolving
+public <W extends Window> WindowedStream<T, KEY, W> window(
+        WindowAssigner<? super T, W> assigner) {
+    return new WindowedStream<>(this, assigner);
+}
+```
+
+接着后面调用了sum，最后生成WindowOperator，该算子作用：
+
+An operator that implements the logic for windowing based on a WindowAssigner和Trigger
+
+这里我们以生成EvictingWindowOperator为例进行分析。
+
+```java
+public SingleOutputStreamOperator<T> sum(int positionToSum) {
+    return aggregate(
+            new SumAggregator<>(positionToSum, input.getType(), input.getExecutionConfig()));
+}
+
+// 递归查看调用，查看到这里指定了窗口的算子：
+public SingleOutputStreamOperator<T> reduce(ReduceFunction<T> function) {
+  if (function instanceof RichFunction) {
+    throw new UnsupportedOperationException(
+      "ReduceFunction of reduce can not be a RichFunction. "
+      + "Please use reduce(ReduceFunction, WindowFunction) instead.");
+  }
+
+  // clean the closure
+  function = input.getExecutionEnvironment().clean(function);
+  // 这里最终生成了实现org.apache.flink.streaming.runtime.operators.windowing.WindowOperator实例
+  
+  return reduce(function, new PassThroughWindowFunction<>());
+}
+
+// reduce:最后将窗口算子加入到流计算的DAG中
+public <R> SingleOutputStreamOperator<R> reduce(
+  ReduceFunction<T> reduceFunction,
+  WindowFunction<T, R, K, W> function,
+  TypeInformation<R> resultType) {
+
+  // clean the closures
+  function = input.getExecutionEnvironment().clean(function);
+  reduceFunction = input.getExecutionEnvironment().clean(reduceFunction);
+
+  final String opName = builder.generateOperatorName(reduceFunction, function);
+
+  OneInputStreamOperator<T, R> operator = builder.reduce(reduceFunction, function);
+  // 添加到DAG
+  return input.transform(opName, resultType, operator);
+}
+```
+
+EvictingWindowOperator
+
+processElement方法是每个算子接收上有数据的方法。是org.apache.flink.streaming.api.operators.Input接口的方法。
+
+```java
+public void processElement(StreamRecord<IN> element) throws Exception {
+    final Collection<W> elementWindows =
+            windowAssigner.assignWindows(
+                    element.getValue(), element.getTimestamp(), windowAssignerContext);
+
+    // if element is handled by none of assigned elementWindows
+    boolean isSkippedElement = true;
+
+    final K key = this.<K>getKeyedStateBackend().getCurrentKey();
+
+    if (windowAssigner instanceof MergingWindowAssigner) {
+        ... // 简化代码分析
+    } else {
+        for (W window : elementWindows) {
+
+            // check if the window is already inactive
+            if (isWindowLate(window)) {
+                continue;
+            }
+            isSkippedElement = false;
+
+            evictingWindowState.setCurrentNamespace(window);
+            evictingWindowState.add(element);
+
+            triggerContext.key = key;
+            triggerContext.window = window;
+            evictorContext.key = key;
+            evictorContext.window = window;
+						
+          	// 窗口期未到
+            TriggerResult triggerResult = triggerContext.onElement(element);
+
+            if (triggerResult.isFire()) {
+                Iterable<StreamRecord<IN>> contents = evictingWindowState.get();
+                if (contents == null) {
+                    // if we have no state, there is nothing to do
+                    continue;
+                }
+              	// 发送窗口数据
+                emitWindowContents(window, contents, evictingWindowState);
+            }
+
+            if (triggerResult.isPurge()) {
+                evictingWindowState.clear();
+            }
+            registerCleanupTimer(window);
+        }
+    }
+
+    // side output input event if
+    // element not handled by any window
+    // late arriving tag has been set
+    // windowAssigner is event time and current timestamp + allowed lateness no less than
+    // element timestamp
+    if (isSkippedElement && isElementLate(element)) {
+        if (lateDataOutputTag != null) {
+            sideOutput(element);
+        } else {
+            this.numLateRecordsDropped.inc();
+        }
+    }
+}
+```
+
+## 水印
+
+
+
+水印是衡量source节点的数据流进度的一个特性，watermark作为数据流中的一部分，可以定时触发也可以按照一定规则精准触发。
+
+引入此机制的目的在于告诉下游算子上游节点数据的进度，这样算子节点根据此进度来判断是否需要处理延迟的数据。
+
+### watermark策略
+
+
+
+
+
 
 
 ## 高可用
@@ -89,9 +246,21 @@ flink与分布式算法有些不同点，比如flink的state叫barrier，并且�
 为了实现端到端的精确一次，以便 sources 中的每个事件都仅精确一次对 sinks 生效，必须满足以下条件：
 
 1. 你的 sources 必须是可重放的，并且
-2. 你的 sinks 必须是事务性的（或幂等的）
+2. 你的 sink必须是事务性的（或幂等的）
+
+### Flink状态的几种实现
+
+
 
 ## Checkpoint
+
+![image-20210318170714330](images/flink-checkpoint.png)
+
+第一张图，有两个source，每个source都会有一个snapshot id，这个snapshot id可能是由checkpoint协调器来分配的，全局统一的一个id，如果中间算子有不止一个上游节点时，其需要等待所有上游数据到来才能进行算子的动作；
+
+第二张图，对齐之后算子开始进行计算任务；
+
+第三张图，执行任务之后将形影的状态记录到backend中，并向所有的下游节点广播其barrier。
 
 ### barriers and align
 
@@ -457,6 +626,38 @@ void snapshotState(FunctionSnapshotContext context) throws Exception {
 }
 ```
 
+# API
+
+
+
+## DataStreamAPI
+
+
+
+### KeyedStream
+
+keyedstream类有keyedBy,sum,max等接口
+
+DataStream的各元素随机分布在各Task Slot中，KeyedStream的各元素按照Key分组，分配到各Task Slot中。我们需要向keyBy算子传递一个参数，以告知Flink以什么字段作为Key进行分组。
+
+
+
+https://www.jianshu.com/p/5cf06e7e8d71
+
+
+
+# 算子
+
+此章节的主要目的是了解算子：比如window和watermark的实现原理
+
+### keyby
+
+### window
+
+
+
+### watermark
+
 
 
 # Connector
@@ -503,7 +704,58 @@ Fetched 0 row(s) in 0.29s
 
 # 源码阅读
 
+## leader选举流程
 
+flink存在很多选举流程，比如dispatcher、jobmanager、resoucemager，他们都是基于zookeeper的NodeCache和LeaderLatch实现的。NodeCache新生成一个对象后会自动在zk上创建路径，也就是说存在多个curator客户端谁先创建谁就是leader。
+
+ZooKeeperLeaderElectionService流程如下：
+
+1.创建新对象
+
+```java
+public ZooKeeperLeaderElectionService(CuratorFramework client, String latchPath, String leaderPath) {
+   this.client = Preconditions.checkNotNull(client, "CuratorFramework client");
+   this.leaderPath = Preconditions.checkNotNull(leaderPath, "leaderPath");
+	 // 创建全局锁，回调isLeader和notLeader方法
+   leaderLatch = new LeaderLatch(client, latchPath);
+   // 创建NodeCache并实现NodeChanged方法监听：这里会在zk上创建leaderpath
+   cache = new NodeCache(client, leaderPath);
+
+   issuedLeaderSessionID = null;
+   confirmedLeaderSessionID = null;
+   confirmedLeaderAddress = null;
+   leaderContender = null;
+
+   running = false;
+}
+```
+
+2.回调isLeader或者notLeader。下面是isLeader流程要做的事情：
+
+随机生成一个leader sessionId并调用竞选者（这里可能是资源管理、dispatcher等）
+
+```java
+public void isLeader() {
+   synchronized (lock) {
+      if (running) {
+         issuedLeaderSessionID = UUID.randomUUID();
+         clearConfirmedLeaderInformation();
+
+         if (LOG.isDebugEnabled()) {
+            LOG.debug(
+               "Grant leadership to contender {} with session ID {}.",
+               leaderContender.getDescription(),
+               issuedLeaderSessionID);
+         }
+
+         leaderContender.grantLeadership(issuedLeaderSessionID);
+      } else {
+         LOG.debug("Ignoring the grant leadership notification since the service has " +
+            "already been stopped.");
+      }
+   }
+}
+```
 
 ## Akka
 
@@ -511,136 +763,7 @@ Fetched 0 row(s) in 0.29s
 
 
 
-下面结合Kafka的一个实例来说明flink的执行流程：
 
-```java
-public void runStartFromLatestOffsets() throws Exception {
-   // 50 records written to each of 3 partitions before launching a latest-starting consuming job
-   final int parallelism = 3;
-   final int recordsInEachPartition = 50;
-
-   // each partition will be written an extra 200 records
-   final int extraRecordsInEachPartition = 200;
-
-   // all already existing data in the topic, before the consuming topology has started, should be ignored
-   final String topicName = writeSequence("testStartFromLatestOffsetsTopic", recordsInEachPartition, parallelism, 1);
-
-   // the committed offsets should be ignored
-   KafkaTestEnvironment.KafkaOffsetHandler kafkaOffsetHandler = kafkaServer.createOffsetHandler();
-   kafkaOffsetHandler.setCommittedOffset(topicName, 0, 23);
-   kafkaOffsetHandler.setCommittedOffset(topicName, 1, 31);
-   kafkaOffsetHandler.setCommittedOffset(topicName, 2, 43);
-
-   // job names for the topologies for writing and consuming the extra records
-   final String consumeExtraRecordsJobName = "Consume Extra Records Job";
-   final String writeExtraRecordsJobName = "Write Extra Records Job";
-
-   // serialization / deserialization schemas for writing and consuming the extra records
-   final TypeInformation<Tuple2<Integer, Integer>> resultType =
-      TypeInformation.of(new TypeHint<Tuple2<Integer, Integer>>() {});
-
-   final SerializationSchema<Tuple2<Integer, Integer>> serSchema =
-         new TypeInformationSerializationSchema<>(resultType, new ExecutionConfig());
-
-   final KafkaDeserializationSchema<Tuple2<Integer, Integer>> deserSchema =
-      new KafkaDeserializationSchemaWrapper<>(
-         new TypeInformationSerializationSchema<>(resultType, new ExecutionConfig()));
-
-   // setup and run the latest-consuming job
-   final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-         env.setParallelism(parallelism);
-
-   final Properties readProps = new Properties();
-   readProps.putAll(standardProps);
-   readProps.setProperty("auto.offset.reset", "earliest"); // this should be ignored
-
-   FlinkKafkaConsumerBase<Tuple2<Integer, Integer>> latestReadingConsumer =
-      kafkaServer.getConsumer(topicName, deserSchema, readProps);
-   latestReadingConsumer.setStartFromLatest();
-
-   // 添加DataStream和Transformation
-   env
-      .addSource(latestReadingConsumer).setParallelism(parallelism)
-      .flatMap(new FlatMapFunction<Tuple2<Integer, Integer>, Object>() {
-         @Override
-         public void flatMap(Tuple2<Integer, Integer> value, Collector<Object> out) throws Exception {
-            if (value.f1 - recordsInEachPartition < 0) {
-               throw new RuntimeException("test failed; consumed a record that was previously written: " + value);
-            }
-         }
-      }).setParallelism(1)
-      .addSink(new DiscardingSink<>());
-
-   // 将StreamGraph转变为JobGraph
-   JobGraph jobGraph = StreamingJobGraphGenerator.createJobGraph(env.getStreamGraph());
-   final JobID consumeJobId = jobGraph.getJobID();
-
-   final AtomicReference<Throwable> error = new AtomicReference<>();
-   Thread consumeThread = new Thread(() -> {
-      try {
-         ClientUtils.submitJobAndWaitForResult(client, jobGraph, KafkaConsumerTestBase.class.getClassLoader());
-      } catch (Throwable t) {
-         if (!ExceptionUtils.findThrowable(t, JobCancellationException.class).isPresent()) {
-            error.set(t);
-         }
-      }
-   });
-   consumeThread.start();
-
-   // wait until the consuming job has started, to be extra safe
-   waitUntilJobIsRunning(client);
-
-   // setup the extra records writing job
-   final StreamExecutionEnvironment env2 = StreamExecutionEnvironment.getExecutionEnvironment();
-
-   env2.setParallelism(parallelism);
-
-   DataStream<Tuple2<Integer, Integer>> extraRecordsStream = env2
-      .addSource(new RichParallelSourceFunction<Tuple2<Integer, Integer>>() {
-
-         private boolean running = true;
-
-         @Override
-         public void run(SourceContext<Tuple2<Integer, Integer>> ctx) throws Exception {
-            int count = recordsInEachPartition; // the extra records should start from the last written value
-            int partition = getRuntimeContext().getIndexOfThisSubtask();
-
-            while (running && count < recordsInEachPartition + extraRecordsInEachPartition) {
-               ctx.collect(new Tuple2<>(partition, count));
-               count++;
-            }
-         }
-
-         @Override
-         public void cancel() {
-            running = false;
-         }
-      });
-
-   kafkaServer.produceIntoKafka(extraRecordsStream, topicName, serSchema, readProps, null);
-
-   try {
-      env2.execute(writeExtraRecordsJobName);
-   }
-   catch (Exception e) {
-      throw new RuntimeException("Writing extra records failed", e);
-   }
-
-   // cancel the consume job after all extra records are written
-   client.cancel(consumeJobId).get();
-   consumeThread.join();
-
-   kafkaOffsetHandler.close();
-   deleteTestTopic(topicName);
-
-   // check whether the consuming thread threw any test errors;
-   // test will fail here if the consume job had incorrectly read any records other than the extra records
-   final Throwable consumerError = error.get();
-   if (consumerError != null) {
-      throw new Exception("Exception in the consuming thread", consumerError);
-   }
-}
-```
 
 ## 任务提交流程
 
