@@ -42,7 +42,7 @@ https://flink.apache.org/zh/usecases.html
 
     *Dispatcher* 提供了一个 REST 接口，用来提交 Flink 应用程序执行，并为每个提交的作业启动一个新的 JobMaster。它还运行 Flink WebUI 用来提供作业执行信息。
 
-- **JobMaster**
+- JobMaster
 
     *JobMaster* 负责管理单个[JobGraph](https://ci.apache.org/projects/flink/flink-docs-release-1.12/zh/concepts/glossary.html#logical-graph)的执行。Flink 集群中可以同时运行多个作业，每个作业都有自己的 JobMaster。
 
@@ -210,8 +210,6 @@ public void processElement(StreamRecord<IN> element) throws Exception {
 引入此机制的目的在于告诉下游算子上游节点数据的进度，这样算子节点根据此进度来判断是否需要处理延迟的数据。
 
 ### watermark策略
-
-
 
 
 
@@ -657,6 +655,73 @@ https://www.jianshu.com/p/5cf06e7e8d71
 
 
 ### watermark
+
+
+
+### UnionTransformation
+
+
+
+### PartitionTransformation
+
+分区算子，分区算子的作用在于提供一种策略对流数据进行均衡。分区规则有两个重要参数一个是上游算子，一个是分区策略：
+
+```java
+public PartitionTransformation(Transformation<T> input, StreamPartitioner<T> partitioner) {
+   this(input, partitioner, ShuffleMode.UNDEFINED);
+}
+```
+
+常见的分区策略有八种：
+
+| 分区策略                  | 策略                                         |      |
+| ------------------------- | -------------------------------------------- | ---- |
+| BinaryHashPartitioner     | 对record中的值进行hash选择channel            |      |
+| BroadcastPartitioner      | 广播模式，会将数据发送给下游的所有算子节点。 |      |
+| ForwardPartitioner        | 一对一，打印日志使用                         |      |
+| GlobalPartitioner         |                                              |      |
+| KeyGroupStreamPartitioner | 根据keyBy指定的字段值进行分区                |      |
+| RebalancePartitioner      | 轮询的方式分发到下游实例                     |      |
+| RescalePartitioner        | n->m                                         |      |
+| ShufflePartitioner        | 随机选择下游算子实例                         |      |
+
+
+
+
+
+```java
+public void connectSource(int inputNumber, IntermediateResult source, JobEdge edge, int consumerNumber) {
+
+   final DistributionPattern pattern = edge.getDistributionPattern();
+   final IntermediateResultPartition[] sourcePartitions = source.getPartitions();
+
+   ExecutionEdge[] edges;
+
+   switch (pattern) {
+      // pointwise的含义是1可能对多，forward和rescale属于这种
+      case POINTWISE:
+         edges = connectPointwise(sourcePartitions, inputNumber);
+         break;
+			// 1对1
+      case ALL_TO_ALL:
+         edges = connectAllToAll(sourcePartitions, inputNumber);
+         break;
+
+      default:
+         throw new RuntimeException("Unrecognized distribution pattern.");
+
+   }
+
+   inputEdges[inputNumber] = edges;
+
+   // add the consumers to the source
+   // for now (until the receiver initiated handshake is in place), we need to register the
+   // edges as the execution graph
+   for (ExecutionEdge ee : edges) {
+      ee.getSource().addConsumer(ee, consumerNumber);
+   }
+}
+```
 
 
 

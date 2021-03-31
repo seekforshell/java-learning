@@ -93,6 +93,9 @@ https://cwiki.apache.org/confluence/display/KAFKA/KIP-98+-+Exactly+Once+Delivery
 | allow.auto.create.topics | 是否允许自动创建topic，只有在broker使能才起作用              |                                                  |
 | allow.auto.create.topics |                                                              |                                                  |
 | isolation.level          | 字符串类型，“read_uncommitted”和“read_committed”，表示消费者所消费到的位置，如果设置为“read_committed"，那么消费这就会忽略事务未提交的消息，既只能消费到LSO(LastStableOffset)的位置，默认情况下，”read_uncommitted",既可以消费到HW（High Watermak）的位置。 | 默认值：read_uncommitted，其他值：read_committed |
+| enable.auto.commit       | 是否自动提交offset                                           |                                                  |
+| client.id                | 唯一标识消费者                                               |                                                  |
+| group.id                 | 组，消费者是否分组；分组则会在客户端启动组协调器：负载用     |                                                  |
 
 
 
