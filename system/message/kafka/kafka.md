@@ -18,8 +18,6 @@ kafka是一个流处理（实时和离线）平台。所以从kafka的使命来�
 
 ## 消费者组
 
-
-
 一个topic可以有多个分区，一个消费者组是一个逻辑订阅者，每一个消费者都对应于topic中的一个或者多个分区。
 
 比如一个topic有6个分区（P0,P1,P2,P3,P4,P5,P6），消费者组有3个（C1,C2,C3），那么可能的对应关系为：
@@ -35,8 +33,6 @@ kafka是一个流处理（实时和离线）平台。所以从kafka的使命来�
 
 
 借上面的图来解释下kafka的设计思路：
-
-
 
 
 
@@ -110,7 +106,7 @@ https://cwiki.apache.org/confluence/display/KAFKA/KIP-98+-+Exactly+Once+Delivery
 - Cache Filesystem Cache PageCache缓存
 - 顺序写 由于现代的操作系统提供了预读和写技术，磁盘的顺序写大多数情况下比随机写内存还要快。
 - Zero-copy 零拷技术减少拷贝次数
-- Batching of Messages 批量量处理。合并小的请求，然后以流的方式进行交互，直顶网络上限。
+- Batching of Messages 批量处理。合并小的请求，然后以流的方式进行交互，直顶网络上限。
 - Pull 拉模式 使用拉模式进行消息的获取消费，与消费端处理能力相符。
 
 ### **Kafka中的事务是怎么实现的？**
@@ -128,6 +124,10 @@ kafka如何保证事务的一致性？
 
 
 ### **Kafka中的消息是否会丢失和重复消费？**
+
+丢失消息可以从生产者、消费者
+
+
 
 ### **kafka producer如何优化打入速度**
 

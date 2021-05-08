@@ -375,7 +375,7 @@ public void enableCheckpointing(
 }
 ```
 
-step-回调启动checkpoint协调器**
+**step-回调启动checkpoint协调器**
 
 org.apache.flink.runtime.checkpoint.CheckpointCoordinatorDeActivator#jobStatusChanges
 
@@ -652,7 +652,7 @@ https://www.jianshu.com/p/5cf06e7e8d71
 
 ### window
 
-
+窗口可分为滑动窗口、滚动窗口、全局窗口、
 
 ### watermark
 
