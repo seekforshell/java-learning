@@ -1355,8 +1355,6 @@ main->runClusterEntrypoint->startCluster->runCluster
 
 #### runCluster
 
-
-
 ```java
 // 2.1 这里将多个工厂类组装在了一起成为一个组件
 // 其中DefaultDispatcherRunnerFactory封装了
