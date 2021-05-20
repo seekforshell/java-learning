@@ -1,6 +1,22 @@
-## 算子
+## Window Assigner
+
+
+
+## Window Trigger
+
+
+
+
+
+## Window Operator
 
 org.apache.flink.streaming.runtime.operators.windowing.WindowOperator
+
+
+
+## 实例分析
+
+
 
 以WindowedStream的reduce方法为例：
 
