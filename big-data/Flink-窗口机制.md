@@ -101,8 +101,6 @@ public class BoundedOutOfOrdernessWatermarks<T> implements WatermarkGenerator<T>
         this.maxTimestamp = Long.MIN_VALUE + outOfOrdernessMillis + 1;
     }
 
-    // ------------------------------------------------------------------------
-
     @Override
     public void onEvent(T event, long eventTimestamp, WatermarkOutput output) {
         maxTimestamp = Math.max(maxTimestamp, eventTimestamp);
@@ -160,8 +158,6 @@ join决定跟那个流做笛卡尔积，where表示左流的过滤条件，equal
     c.判断窗口是否过期
 
     d.是否触发窗口。如果是进行步骤e
-
-    这里以
 
     e.注册窗口清理回调，保证时间达到窗口结束时间时发送数据到下游
 
