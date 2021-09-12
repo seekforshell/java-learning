@@ -1,0 +1,8 @@
+@startuml
+KafkaProducer -> TransactionManager: initTransactions
+TransactionManager -> Sender:FindCoordinatorRequest、InitProducerIdRequest
+Sender -> Sender:maybeSendAndPollTransactionalRequest
+Sender -> TransactionCoordinator:事务消息
+
+
+@enduml
