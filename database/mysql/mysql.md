@@ -51,7 +51,7 @@
 
 
 
-![innodb-architecture](/Users/renfei/workspace/git/java-learning/database/mysql/images/innodb-architecture.png)
+![innodb-architecture](images/innodb-architecture.png)
 
 
 
@@ -366,8 +366,8 @@ https://www.cnblogs.com/sunjingwu/p/10755823.html
 ​    
 ​    To load the dump file back into the server:
 ​    
-       shell> mysql db_name < backup-file.sql
-    
+​       shell> mysql db_name < backup-file.sql
+​    
     Another way to reload the dump file:
     
        shell> mysql -e "source /path-to-backup/backup-file.sql" db_name
