@@ -1063,6 +1063,8 @@ final Node<K,V>[] resize() {
 
 ### LinkedHashMap
 
+#### 原理
+
 Linked相对于HashMap实现了访问有序和插入访问有序。
 
 其主要设计思想有两个方便：
@@ -1095,9 +1097,52 @@ Node<K,V> newNode(int hash, K key, V value, Node<K,V> e) {
 }
 ```
 
+此外linkedhashmap还实现了以下接口用于做LRU使用
+
+```java
+// Callbacks to allow LinkedHashMap post-actions
+// 会将节点移到队列尾部
+void afterNodeAccess(Node<K,V> p) { }
+// 如果想要实现LRU可以重载removeEldestEntry方法进入驱逐条件
+void afterNodeInsertion(boolean evict) { }
+void afterNodeRemoval(Node<K,V> p) { }
+```
+
 #### LRU算法
 
-Todo
+这里我们借用kafka的一个LRU的实例模型：
+
+```java
+public class LRUCache<K, V> implements Cache<K, V> {
+    private final LinkedHashMap<K, V> cache;
+
+    public LRUCache(final int maxSize) {
+        this.cache = new LinkedHashMap<K, V>(16, 0.75F, true) {
+            protected boolean removeEldestEntry(Entry<K, V> eldest) {
+                return this.size() > maxSize;
+            }
+        };
+    }
+
+    public V get(K key) {
+        return this.cache.get(key);
+    }
+
+    public void put(K key, V value) {
+        this.cache.put(key, value);
+    }
+
+    public boolean remove(K key) {
+        return this.cache.remove(key) != null;
+    }
+
+    public long size() {
+        return (long)this.cache.size();
+    }
+}
+```
+
+
 
 ### **ConcurrentSkipListMap**
 
@@ -1578,6 +1623,8 @@ java.util.concurrent.ConcurrentHashMap.KeySetView
 ### ConcurrentSkipListSet
 
 ## List
+
+
 
 
 

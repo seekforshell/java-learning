@@ -190,7 +190,7 @@ cms收集器内存被分为三块：
 
 ##### Young GC回收流程
 
-young gc的回收流程是年轻代的收集算法而定，基本使用复制算法。
+young gc的回收流程视年轻代的收集算法而定，基本使用复制算法。
 
 The young generation is colored light green and the old generation in blue. This is what the CMS might look like if your application has been running for a while. Objects are scattered around the old generation area.
 
